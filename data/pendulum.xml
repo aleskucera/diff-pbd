@@ -1,0 +1,29 @@
+<mujoco model="sphere_robot">
+    <compiler angle="radian" />
+    <default>
+        <geom friction="0.5 0.1 0.1" rgba="0.1 0.8 0.1 1" />
+    </default>
+    <option gravity="0 0 -9.81" />
+
+    <worldbody>
+        <!-- Ground Plane -->
+        <geom type="plane" size="5 5 0.1" rgba="0.8 0.8 0.8 1" />
+
+        <!-- Sphere Robot -->
+        <body name="robot" pos="0 0 0.5">
+            <joint name="free_joint" type="free" />
+            <geom name="sphere" type="sphere" size="0.2" rgba="0.2 0.5 1 1" />
+        </body>
+    </worldbody>
+
+    <actuator>
+        <!-- Actuators to move the sphere -->
+        <general name="x_force" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="1 0 0 0 0 0" />
+        <general name="y_force" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="0 1 0 0 0 0" />
+        <general name="z_force" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="0 0 1 0 0 0" />
+        <general name="x_torque" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="0 0 0 1 0 0" />
+        <general name="y_torque" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="0 0 0 0 1 0" />
+        <general name="z_torque" joint="free_joint" ctrllimited="true" ctrlrange="-10 10" gainprm="1 1 1" gear="0 0 0 0 0 1" />
+    </actuator>
+</mujoco>
+
