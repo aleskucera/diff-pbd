@@ -5,23 +5,21 @@ import {
 
 export class AnimationController {
   constructor(app) {
-    this.app = app; // Reference to your app object
-    this.states = []; // Array of animation frames
-    this.isPlaying = false; // Playback state
-    this.playbackSpeed = 1; // Playback speed multiplier
-    this.lastUpdateTime = 0; // For controlling update rate
-    this.currentStateIndex = 0; // Current state index
+    this.app = app;
+    this.states = [];
+    this.isPlaying = false;
+    this.playbackSpeed = 1;
+    this.lastUpdateTime = 0;
+    this.currentStateIndex = 0;
   }
 
   loadAnimation(states) {
     this.states = states;
     this.currentStateIndex = 0;
 
-    // Delete state-specific objects
     Object.values(this.app.contactPoints).forEach((obj) =>
       this.app.scene.remove(obj),
     );
-
     Object.values(this.app.contactNormals).forEach((obj) =>
       this.app.scene.remove(obj),
     );
@@ -66,21 +64,14 @@ export class AnimationController {
     if (!this.isPlaying) return;
 
     const currentTime = Date.now();
-
-    // Get the current state's time and the next state's time
     const currentState = this.states[this.currentStateIndex];
     const nextState = this.states[this.currentStateIndex + 1];
 
-    // Ensure there's a next state to transition to
     if (nextState) {
-      // Calculate the scaled time difference between the current and next states
       const stateTimeDiff =
         (nextState.time - currentState.time) / this.playbackSpeed;
+      const elapsedTime = (currentTime - this.lastUpdateTime) / 1000;
 
-      // Calculate the elapsed time since the last frame
-      const elapsedTime = (currentTime - this.lastUpdateTime) / 1000; // Convert ms to seconds
-
-      // If enough scaled time has passed, move to the next state
       if (elapsedTime >= stateTimeDiff) {
         this.currentStateIndex++;
         this.updateScene();
@@ -90,7 +81,6 @@ export class AnimationController {
       this.currentStateIndex = 0;
     }
 
-    // Request the next frame
     requestAnimationFrame(() => this.animate());
   }
 
@@ -107,11 +97,9 @@ export class AnimationController {
       }
     });
 
-    // Update the temporary objects
     Object.values(this.app.contactPoints).forEach((obj) =>
       this.app.scene.remove(obj),
     );
-
     Object.values(this.app.contactNormals).forEach((obj) =>
       this.app.scene.remove(obj),
     );
@@ -127,5 +115,7 @@ export class AnimationController {
       this.app.scene.add(contactNormals);
       this.app.contactNormals[body.name] = contactNormals;
     });
+
+    this.app.selectionWindow.update();
   }
 }

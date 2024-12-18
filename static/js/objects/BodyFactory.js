@@ -12,6 +12,11 @@ export function createBody(bodyData) {
     bodyData.collision_points || [], // Pass empty array if no collision points
   );
 
+  // Add name for debugging
+  objects.mesh.name = bodyData.name;
+  objects.wireframe.name = bodyData.name + "_wireframe";
+  if (objects.points) objects.points.name = bodyData.name + "_points";
+
   // Create a group to hold all visualizations
   const bodyGroup = new THREE.Group();
   bodyGroup.add(objects.mesh);
@@ -20,6 +25,7 @@ export function createBody(bodyData) {
 
   // Set initial transform
   setTransform(bodyGroup, bodyData.q);
+  bodyGroup.name = bodyData.name;
 
   return bodyGroup;
 }

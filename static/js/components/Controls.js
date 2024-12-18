@@ -1,5 +1,5 @@
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CONTROLS_CONFIG } from "../config.js";
+import { CONTROLS_CONFIG, SELECTION_CONFIG } from "../config.js";
 
 export function setupControls(camera, renderer) {
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -14,17 +14,63 @@ export function setupControls(camera, renderer) {
 }
 
 function setupControlEvents(controls) {
+  let activeSelectionMode = null;
+
+  // Prevent OrbitControls from interfering during selection
+  const keyDownHandler = (event) => {
+    const keyPressed = event.key.toLowerCase().replace("control", "ctrl");
+
+    // Check if the pressed key matches any selection mode
+    for (const [mode, config] of Object.entries(SELECTION_CONFIG)) {
+      if (keyPressed === config.key) {
+        activeSelectionMode = mode;
+        controls.enabled = false; // Disable controls
+        document.body.style.cursor = "crosshair"; // Change cursor to indicate selection mode
+        break;
+      }
+    }
+  };
+
+  const keyUpHandler = (event) => {
+    const keyReleased = event.key.toLowerCase().replace("control", "ctrl");
+    // Check if the released key matches the active selection mode
+    for (const [mode, config] of Object.entries(SELECTION_CONFIG)) {
+      if (keyReleased === config.key && activeSelectionMode === mode) {
+        activeSelectionMode = null;
+        controls.enabled = true; // Enable controls
+        document.body.style.cursor = "auto"; // Reset cursor
+        break;
+      }
+    }
+  };
+
+  // Add event listeners for keypress
+  window.addEventListener("keydown", keyDownHandler);
+  window.addEventListener("keyup", keyUpHandler);
+
+  // Update cursor during drag
   controls.addEventListener("start", () => {
-    document.body.style.cursor = "grabbing";
+    if (!activeSelectionMode) {
+      document.body.style.cursor = "grabbing";
+    }
   });
 
   controls.addEventListener("end", () => {
-    document.body.style.cursor = "auto";
+    if (!activeSelectionMode) {
+      document.body.style.cursor = "auto";
+    }
   });
 
-  // Optional: Add more custom event handlers
+  // Clean up function to remove event listeners
+  controls.dispose = () => {
+    window.removeEventListener("keydown", keyDownHandler);
+    window.removeEventListener("keyup", keyUpHandler);
+    controls.dispose();
+  };
+
+  // Optional: Add more custom event handlers if needed
   controls.addEventListener("change", () => {
-    // Handle control changes here if needed
+    // Handle control changes
   });
 }
 

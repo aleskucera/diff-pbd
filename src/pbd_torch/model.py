@@ -520,6 +520,7 @@ class Model:
         # Calculate robot mass and inertia
         self.robot_mass = torch.sum(self.body_mass[self.robot_body])
         self.robot_inv_mass = 1 / self.robot_mass
+        self.robot_inv_mass = 1.0
 
         self.robot_inertia = torch.zeros((3, 3), device=self.device)
         for b in self.robot_body:
@@ -533,6 +534,7 @@ class Model:
             self.robot_inertia += R @ I_m @ R.T
 
         self.robot_inv_inertia = torch.inverse(self.robot_inertia)
+        self.robot_inv_inertia = torch.eye(3)
 
     def state(self):
         state = State()

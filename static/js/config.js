@@ -105,3 +105,16 @@ export const CONTACT_CONFIG = {
     color: 0xff0000,
   },
 };
+
+export const SELECTION_CONFIG = {
+  BODIES: {
+    key: "ctrl",
+    set: "selectedBodies",
+    objects: "bodies",
+  },
+  CONTACT_POINTS: {
+    key: "Alt",
+    set: "selectedContactPoints",
+    objects: "contactPoints",
+  },
+};

@@ -9,7 +9,7 @@ def resolve_collisions(model: Model, state: State):
     robot_dx = torch.zeros(3)
     robot_dq = torch.zeros(4)
 
-    robot_contact_deltas = torch.zeros((state.contact_count, 7))
+    state.robot_contact_deltas = torch.zeros((state.contact_count, 7))
 
     for i in range(state.contact_count):
         b = state.contact_body[i].item()  # Body index
@@ -42,8 +42,9 @@ def resolve_collisions(model: Model, state: State):
         robot_dx += dx
         robot_dq += dq
 
-        robot_contact_deltas[i] = torch.cat([dx, dq])
-    return robot_contact_deltas
+        state.robot_contact_deltas[i] = torch.cat([dx, dq])
+    print(f"Robot dx: {robot_dx}")
+    print(f"Robot dq: {robot_dq}")
 
     # delta_robot_q = torch.cat([robot_dx, robot_dq])
     # if state.contact_count > 0:
@@ -60,6 +61,9 @@ def update_velocity(model: Model, state_prev: State, state: State, dt: float):
 
     v = (x - x_prev) / dt
     w = numerical_angular_velocity(q, q_prev, dt)
+
+    print(f"Robot old qd: {state_prev.robot_qd}")
+    print(f"Robot new qd: {torch.cat([w, v])}")
 
     state.robot_qd = torch.cat([w, v]).clone()
 
@@ -169,30 +173,32 @@ def robot_friction_force(model: Model, state: State):
 
 
 def update_bodies(model: Model, state: State):
+    print(f"\tRobot q: {state.robot_q}")
     for b in range(model.body_count):
         robot_x = state.robot_q[:3]
         robot_rot = state.robot_q[3:]
 
-        # X = robot_to_body_transform(model.robot_q, model.body_q[b])
-        X = body_to_robot_transform(model.body_q[b], model.robot_q)
+        init_robot_x = model.robot_q[:3]
+        init_robot_rot = model.robot_q[3:]
 
-        q_rel = relative_rotation(state.robot_q[3:], model.robot_q[3:])
-        # q_rel = relative_rotation(model.robot_q[3:], state.robot_q[3:])
+        init_body_x = model.body_q[b, :3]
+        init_body_rot = model.body_q[b, 3:]
 
-        # body_x = robot_x + rotate_vectors(X[:3], robot_rot)
-        # body_x = robot_x + model.body_q[b, :3] - model.robot_q[:3]
-        # body_rot = quat_mul(quat_mul(robot_rot, quat_inv(model.robot_q[3:])), model.body_q[b, 3:])
+        q_rel = relative_rotation(robot_rot, init_robot_rot)
 
-        body_x = robot_x + rotate_vectors(
-            model.body_q[b, :3] - model.robot_q[:3], q_rel)
-        body_rot = quat_mul(q_rel, model.body_q[b, 3:])
+        body_x = robot_x + rotate_vectors(init_body_x - init_robot_x, q_rel)
+        body_rot = quat_mul(q_rel, init_body_rot)
+
+        print(f"\tBody {model.body_name[b]}:")
+        print(f"\t\tOld body_q: {state.body_q[b]},\n"
+              f"\t\tNew body_q: {torch.cat([body_x, body_rot])}")
 
         state.body_q[b] = torch.cat([body_x, body_rot])
 
 
 class RobotIntegrator:
 
-    def __init__(self, iterations: int = 5):
+    def __init__(self, iterations: int = 2):
         self.iterations = iterations
 
     def simulate(self, model: Model, state_in: State, state_out: State,
@@ -203,8 +209,8 @@ class RobotIntegrator:
         for _ in range(self.iterations):
             resolve_collisions(model, state_out)
             state_out.add_robot_contact_deltas()
+            update_bodies(model, state_out)
         update_velocity(model, state_in, state_out, dt)
-        update_bodies(model, state_out)
         # update_bodies(model, state_out)
         # collide(model, state_out)
         # robot_friction_force(model, state_out)

@@ -1,7 +1,6 @@
 import os
 
 import torch
-from pbd_torch.animation import AnimationController2
 from pbd_torch.constants import *
 from pbd_torch.model import *
 from pbd_torch.robot_integrator import RobotIntegrator
@@ -12,12 +11,12 @@ from tqdm import tqdm
 
 def main():
     time = 0.0
-    dt = 0.01
-    n_steps = 100
+    dt = 0.001
+    n_steps = 250
     output_file = os.path.join('simulation', 'robot.json')
 
     model = Model()
-    integrator = RobotIntegrator()
+    integrator = RobotIntegrator(iterations=1)
 
     # Add robot base
     base = model.add_box(m=1.0,
@@ -86,9 +85,6 @@ def main():
 
     print(f'Saving simulation to {output_file}')
     save_simulation(model, states, output_file)
-
-    # animator = AnimationController2(model, states)
-    # animator.start()
 
 
 if __name__ == '__main__':

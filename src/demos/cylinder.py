@@ -22,7 +22,7 @@ def main():
     box = model.add_cylinder(m=1.0,
                              radius=1.0,
                              height=0.2,
-                             name='sphere',
+                             name='cylinder',
                              pos=Vector3(torch.tensor([0.0, 0.0, 3.5])),
                              rot=Quaternion(ROT_IDENTITY),
                              n_collision_points_base=64,
