@@ -1,46 +1,47 @@
-import {
-  createContactPoints,
-  createContactNormals,
-} from "../objects/ContactFactory.js";
-
 export class AnimationController {
   constructor(app) {
     this.app = app;
     this.states = [];
     this.isPlaying = false;
     this.playbackSpeed = 1;
-    this.lastUpdateTime = 0;
-    this.currentStateIndex = 0;
-  }
+    this.isRecording = false;
+    this.capturer = null;
+    this.startTime = null;
+    this.frameCount = 0;
+    this.recordingFormat = "webm"; // Default recording format
 
+    // Add progress display
+    this.progressElement = this.createProgressElement();
+  }
   loadAnimation(states) {
     this.states = states;
     this.currentStateIndex = 0;
-
-    Object.values(this.app.contactPoints).forEach((obj) =>
-      this.app.scene.remove(obj),
-    );
-    Object.values(this.app.contactNormals).forEach((obj) =>
-      this.app.scene.remove(obj),
-    );
-    console.log("Loaded animation states:", states.length);
+    this.animationStartTime = performance.now(); // Use performance.now() for more precise timing
   }
 
   play() {
-    this.isPlaying = true;
-    this.animate();
+    if (!this.isPlaying) {
+      this.isPlaying = true;
+      this.animationStartTime = performance.now();
+      this.animate();
+    }
   }
 
   pause() {
     this.isPlaying = false;
   }
 
+  setSpeed(speed) {
+    this.playbackSpeed = speed;
+  }
+
+  setRecordingFormat(format) {
+    this.recordingFormat = format;
+  }
+
   stepForward() {
     if (this.currentStateIndex < this.states.length - 1) {
       this.currentStateIndex++;
-      this.updateScene();
-    } else {
-      this.currentStateIndex = 0;
       this.updateScene();
     }
   }
@@ -49,73 +50,146 @@ export class AnimationController {
     if (this.currentStateIndex > 0) {
       this.currentStateIndex--;
       this.updateScene();
-    } else {
-      this.currentStateIndex = this.states.length - 1;
-      this.updateScene();
     }
   }
 
-  setSpeed(speed) {
-    console.debug("Speed changed to", speed);
-    this.playbackSpeed = speed;
+  createProgressElement() {
+    const progress = document.createElement("div");
+    progress.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px;
+      border-radius: 4px;
+      font-family: monospace;
+      display: none;
+    `;
+    document.body.appendChild(progress);
+    return progress;
+  }
+
+  setRecordingFormat(format) {
+    this.recordingFormat = format;
+  }
+
+  startRecording() {
+    if (this.isRecording) return;
+
+    // Reset animation to start
+    this.currentStateIndex = 0;
+    this.animationStartTime = performance.now();
+
+    const options = {
+      framerate: 30,
+      verbose: true,
+      motionBlurFrames: 1,
+    };
+
+    // Set format-specific options
+    if (this.recordingFormat === "webm") {
+      options.format = "webm";
+      options.quality = 200;
+    } else if (this.recordingFormat === "jpg") {
+      options.format = "jpg";
+      options.quality = 500;
+    }
+
+    // Initialize CCapture
+    this.capturer = new CCapture(options);
+
+    this.isRecording = true;
+    this.frameCount = 0;
+    this.startTime = performance.now();
+    this.progressElement.style.display = "block";
+
+    // Start recording and play animation if not already playing
+    this.capturer.start();
+    if (!this.isPlaying) {
+      this.play();
+    }
+  }
+
+  stopRecording() {
+    if (!this.isRecording) return;
+
+    this.isRecording = false;
+
+    this.capturer.stop();
+    this.capturer.save();
+    this.progressElement.style.display = "none";
+
+    // Reset recording state
+    this.startTime = null;
+    this.frameCount = 0;
   }
 
   animate() {
     if (!this.isPlaying) return;
 
-    const currentTime = Date.now();
-    const currentState = this.states[this.currentStateIndex];
-    const nextState = this.states[this.currentStateIndex + 1];
+    const currentTime = performance.now();
+    const elapsedSeconds = (currentTime - this.animationStartTime) / 1000;
+    const adjustedTime = elapsedSeconds * this.playbackSpeed;
 
-    if (nextState) {
-      const stateTimeDiff =
-        (nextState.time - currentState.time) / this.playbackSpeed;
-      const elapsedTime = (currentTime - this.lastUpdateTime) / 1000;
+    // Calculate total animation duration
+    const totalDuration = this.states[this.states.length - 1].time;
 
-      if (elapsedTime >= stateTimeDiff) {
-        this.currentStateIndex++;
-        this.updateScene();
-        this.lastUpdateTime = currentTime;
-      }
-    } else {
-      this.currentStateIndex = 0;
+    // Calculate the current time in the animation loop
+    const loopTime = adjustedTime % totalDuration;
+
+    // Find the appropriate state index
+    let newStateIndex = 0;
+    while (
+      newStateIndex < this.states.length - 1 &&
+      this.states[newStateIndex + 1].time <= loopTime
+    ) {
+      newStateIndex++;
     }
 
+    // Update state if changed
+    if (newStateIndex !== this.currentStateIndex) {
+      this.currentStateIndex = newStateIndex;
+      this.updateScene();
+    }
+
+    if (this.isRecording && this.capturer) {
+      this.frameCount++;
+      const elapsed = currentTime - this.startTime;
+      const duration = totalDuration * 1000; // Convert to milliseconds
+
+      // Update progress display
+      const progress = Math.min(((elapsed / duration) * 100).toFixed(1), 100);
+      this.progressElement.textContent = `Recording: ${progress}%`;
+
+      this.capturer.capture(this.app.renderer.domElement);
+
+      // Stop recording if we've completed one loop
+      if (elapsed >= duration) {
+        this.stopRecording();
+      }
+    }
     requestAnimationFrame(() => this.animate());
   }
-
   updateScene() {
     if (!this.app.bodies || !this.states[this.currentStateIndex]) return;
 
     const state = this.states[this.currentStateIndex];
 
-    state.bodies.forEach((body) => {
-      const object = this.app.bodies[body.name];
-      if (object) {
-        object.position.set(body.q[0], body.q[1], body.q[2]);
-        object.quaternion.set(body.q[4], body.q[5], body.q[6], body.q[3]);
+    if (state.robot) {
+      const robot = this.app.bodies.get(state.robot.name);
+      if (robot) {
+        robot.updateState(state.robot);
+      }
+    }
+
+    state.bodies.forEach((bodyState) => {
+      const body = this.app.bodies.get(bodyState.name);
+      if (body) {
+        body.updateState(bodyState);
       }
     });
 
-    Object.values(this.app.contactPoints).forEach((obj) =>
-      this.app.scene.remove(obj),
-    );
-    Object.values(this.app.contactNormals).forEach((obj) =>
-      this.app.scene.remove(obj),
-    );
-
-    state.bodies.forEach((body) => {
-      if (body.contact_points.length === 0) return;
-      const contactPoints = createContactPoints(body.contact_points);
-      contactPoints.visible = this.app.contactPointsVisible;
-      const contactNormals = createContactNormals(body.contact_normals);
-      contactNormals.visible = this.app.contactNormalsVisible;
-      this.app.scene.add(contactPoints);
-      this.app.contactPoints[body.name] = contactPoints;
-      this.app.scene.add(contactNormals);
-      this.app.contactNormals[body.name] = contactNormals;
-    });
-
-    this.app.selectionWindow.update();
+    this.app.bodyStateWindow.update();
   }
 }

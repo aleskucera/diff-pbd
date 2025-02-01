@@ -1,7 +1,4 @@
-import numpy as np
-import pytest
 import torch
-from scipy.spatial.transform import Rotation as R
 
 
 def quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
@@ -9,23 +6,24 @@ def quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     Multiply two quaternions.
     q = [w, x, y, z]
     """
-    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    w1, x1, y1, z1 = q1[..., 0].clone(), q1[..., 1].clone(), q1[..., 2].clone(), q1[..., 3].clone()
+    w2, x2, y2, z2 = q2[..., 0].clone(), q2[..., 1].clone(), q2[..., 2].clone(), q2[..., 3].clone()
 
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
 
-    return torch.stack([w, x, y, z], dim=-1).type(q1.dtype)
+    q_out = torch.stack([w, x, y, z], dim=-1).type(q1.dtype)
 
+    return q_out
 
 def quat_inv(q: torch.Tensor) -> torch.Tensor:
     """
     Compute the conjugate of a quaternion.
     q = [w, x, y, z] -> q* = [w, -x, -y, -z]
     """
-    return torch.cat([q[..., :1], -q[..., 1:]], dim=-1).type(q.dtype)
+    return torch.cat([q[..., :1].clone(), -q[..., 1:].clone()], dim=-1).type(q.dtype)
 
 
 def rotate_vectors(points: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
@@ -33,14 +31,15 @@ def rotate_vectors(points: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     Rotate vector v by quaternion q.
     v_rotated = q * v * q*
     """
-    v_quat = torch.cat([torch.zeros_like(points[..., :1]), points], dim=-1)
+    v_quat = torch.cat([torch.zeros_like(points[..., :1], device=points.device), points], dim=-1)
     temp = quat_mul(q, v_quat)
     q_conj = quat_inv(q)
     rotated = quat_mul(temp, q_conj)
     return rotated[..., 1:].type(points.dtype)
 
 
-def rotate_vectors_inverse(points: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+def rotate_vectors_inverse(points: torch.Tensor,
+                           q: torch.Tensor) -> torch.Tensor:
     """
     Rotate vector v by the inverse of quaternion q.
     v_rotated = q* * v * q
@@ -203,14 +202,17 @@ def relative_rotation(q_a: torch.Tensor, q_b: torch.Tensor):
     q_rel = quat_mul(q_b, quat_inv(q_a))
     return q_rel
 
-def relative_transform(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
+
+def relative_transform(body_q_a: torch.Tensor,
+                       body_q_b: torch.Tensor) -> torch.Tensor:
     """Compute the relative transform between two poses. This transform can
     take vectors in the local frame of q_a and transform them to the local
     frame of q_b.
     """
-    x = rotate_vectors_inverse(q_a[:3] - q_b[:3], q_b[3:])
-    q = quat_mul(q_b[3:], quat_inv(q_a[3:]))
+    x = rotate_vectors_inverse(body_q_a[:3] - body_q_b[:3], body_q_b[3:])
+    q = quat_mul(body_q_b[3:], quat_inv(body_q_a[3:]))
     return torch.cat([x, q])
+
 
 def delta_q_fixed(q_a: torch.Tensor, q_b: torch.Tensor):
     dq = quat_mul(q_a, quat_inv(q_b))
@@ -248,10 +250,31 @@ def robot_to_body(r: torch.Tensor, robot_q: torch.Tensor,
     world_r = body_to_world(r, body_q)
     return world_to_body(world_r, robot_q)
 
+
 def body_to_robot_transform(body_q: torch.Tensor,
                             robot_q: torch.Tensor) -> torch.Tensor:
     return relative_transform(body_q, robot_q)
 
+
 def robot_to_body_transform(robot_q: torch.Tensor,
                             body_q: torch.Tensor) -> torch.Tensor:
     return relative_transform(robot_q, body_q)
+
+
+def transform_multiply(body_q_a: torch.Tensor,
+                       body_q_b: torch.Tensor) -> torch.Tensor:
+    # Extract positions and orientations
+    x_a = body_q_a[:3]  # position of frame A
+    q_a = body_q_a[3:]  # orientation of frame A
+    x_b = body_q_b[:3]  # position of frame B
+    q_b = body_q_b[3:]  # orientation of frame B
+
+    # First combine the rotations
+    q = quat_mul(q_a, q_b)
+
+    # Then transform the position:
+    # 1. Rotate frame B's position by frame A's rotation
+    # 2. Add frame A's position
+    x = x_a + rotate_vectors(x_b, q_a)
+
+    return torch.cat([x, q])

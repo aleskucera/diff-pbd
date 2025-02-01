@@ -1,7 +1,13 @@
 export const APP_CONFIG = {
-  bodyVisualizationMode: "mesh",
+  bodyVisualizationMode: "points", // ["mesh", "wireframe", "points"]
   contactPointsVisible: false,
-  contactNormalsVisible: false,
+  axesVisible: false,
+  bodyVectorVisible: {
+    linearVelocity: false,
+    angularVelocity: false,
+    linearForce: false,
+    torque: false,
+  },
 };
 
 export const CONTROLS_CONFIG = {
@@ -23,6 +29,7 @@ export const SCENE_CONFIG = {
 
 export const RENDERER_CONFIG = {
   antialias: true,
+  preserveDrawingBuffer: true,
   pixelRatio: window.devicePixelRatio,
   clearColor: 0x000000,
   clearAlpha: 0.0,
@@ -82,15 +89,53 @@ export const BODY_CONFIG = {
     metalness: 0.9,
     opacity: 1.0,
     envMapIntensity: 0.5,
+    envMapPath: "static/textures/cube/SwedishRoyalCastle/",
   },
   points: {
     size: 0.2,
     opacity: 0.7,
-    texture: "static/textures/points/ball1.png",
+    alphaTest: 0.5,
     transparent: false,
+    texture: "static/textures/points/ball1.png",
   },
-  maps: {
-    env: "static/textures/cube/SwedishRoyalCastle/",
+  contactPoints: {
+    size: 1.0,
+    opacity: 1.0,
+    alphaTest: 0.5,
+    transparent: false,
+    texture: "static/textures/contacts/red-cross0.png",
+  },
+};
+
+export const BODY_VECTOR_CONFIG = {
+  // Linear velocity
+  linearVelocity: {
+    color: 0x2ca02c,
+    scale: 1.0,
+  },
+  // Angular velocity
+  angularVelocity: {
+    color: 0xffff00,
+    scale: 1.0,
+  },
+  // Force
+  linearForce: {
+    color: 0xff7f0e,
+    scale: 1.0,
+  },
+  // Torque
+  torque: {
+    color: 0xd62728,
+    scale: 1.0,
+  },
+};
+
+export const POINT_VECTOR_CONFIG = {
+  // Contact Normal (n)
+  contactNormal: {
+    color: 0xff0000,
+    scale: 0.5,
+    visible: false,
   },
 };
 

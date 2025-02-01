@@ -1,4 +1,5 @@
 import { createBody } from "../objects/BodyFactory.js";
+import { Body } from "../objects/Body.js";
 import { createPlaybackControls } from "../ui/PlaybackControls.js";
 
 export function setupWebSocket(app) {
@@ -21,19 +22,34 @@ export function setupWebSocket(app) {
 }
 
 function handleModel(model, app) {
-  console.debug("Received model config:", model);
+  try {
+    console.debug("Received model:", model);
+  } catch (error) {
+    console.error("Failed to parse model:", error);
+    return;
+  }
 
   // Clear existing objects
-  Object.values(app.bodies).forEach((obj) => app.scene.remove(obj));
-  app.bodies = {};
+  for (const body of app.bodies.values()) {
+    app.scene.remove(body);
+  }
 
-  model.bodies.forEach((body) => {
-    const object = createBody(body);
-    if (object) {
-      app.bodies[body.name] = object;
-      app.scene.add(object);
+  app.bodies = new Map();
+
+  if (model.robot) {
+    const body = new Body(model.robot, app.bodyVisualizationMode);
+    app.bodies.set(model.robot.name, body);
+    app.scene.add(body.getObject3D());
+  }
+
+  model.bodies.forEach((bodyData) => {
+    const body = new Body(bodyData, app.bodyVisualizationMode);
+    if (body) {
+      app.bodies.set(bodyData.name, body);
+      app.scene.add(body.getObject3D());
     }
   });
+  app.bodyStateWindow.update();
 }
 
 function handleStates(states, app) {

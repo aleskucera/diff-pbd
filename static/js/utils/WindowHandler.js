@@ -60,9 +60,6 @@ function handleKeyboard(event, app) {
     case "r": // Reset camera
       resetCamera(app);
       break;
-    case "f": // Toggle fullscreen
-      toggleFullscreen();
-      break;
     case "h": // Toggle help overlay
       toggleHelpOverlay();
       break;

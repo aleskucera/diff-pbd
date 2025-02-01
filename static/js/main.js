@@ -1,8 +1,8 @@
 import { initScene } from "./components/Scene.js";
 import { setupWebSocket } from "./utils/WebSocket.js";
-import { initUIControls } from "./ui/Controls.js";
+import { UIControls } from "./ui/Controls.js";
 import { setupWindowHandlers } from "./utils/WindowHandler.js";
-import { SelectionWindow } from "./ui/SelectionWindow.js";
+import { BodyStateWindow } from "./ui/BodyStateWindow.js";
 import { AnimationController } from "./components/AnimationController.js";
 import { InteractionController } from "./components/InteractionController.js";
 import { APP_CONFIG } from "./config.js";
@@ -12,24 +12,28 @@ let app = {
   camera: null,
   controls: null,
   renderer: null,
-  selectionWindow: null,
+  uiControls: null,
+  bodyStateWindow: null,
   animationController: null,
   interactionController: null,
 
   selectedObjects: new Set(),
 
   // Body objects
-  bodies: {},
-  bodyVisualizationMode: APP_CONFIG.bodyVisualizationMode,
+  bodies: new Map(),
   selectedBodies: new Set(),
 
-  // Contact points and normals
-  contactPoints: {},
+  // Controls
+  axesVisible: APP_CONFIG.axesVisible,
+  bodyVisualizationMode: APP_CONFIG.bodyVisualizationMode,
   contactPointsVisible: APP_CONFIG.contactPointsVisible,
-  selectedContactPoints: new Set(),
 
-  contactNormals: {},
-  contactNormalsVisible: APP_CONFIG.contactNormalsVisible,
+  bodyVectorVisible: {
+    linearVelocity: APP_CONFIG.bodyVectorVisible.linearVelocity,
+    angularVelocity: APP_CONFIG.bodyVectorVisible.angularVelocity,
+    linearForce: APP_CONFIG.bodyVectorVisible.linearForce,
+    torque: APP_CONFIG.bodyVectorVisible.torque,
+  },
 };
 
 function init() {
@@ -39,11 +43,11 @@ function init() {
   setupWebSocket(app);
   setupWindowHandlers(app);
 
-  initUIControls(app);
+  app.uiControls = new UIControls(app);
 
-  app.selectionWindow = new SelectionWindow(app);
+  app.bodyStateWindow = new BodyStateWindow(app);
   app.animationController = new AnimationController(app);
-  app.interactionController = new InteractionController(app);
+  // app.interactionController = new InteractionController(app);
 
   animate();
 }

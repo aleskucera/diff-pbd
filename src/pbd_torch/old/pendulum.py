@@ -5,7 +5,7 @@ from pbd_torch.correction import *
 from pbd_torch.old.cuboid import Cuboid
 from pbd_torch.old.sphere import Sphere
 from pbd_torch.transform import *
-from pbd_torch.utils import *
+from demos.utils import *
 from pbd_torch.animation import *
 
 

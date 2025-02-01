@@ -1,46 +1,45 @@
 import os
 
 import torch
-from pbd_torch.constants import *
+from demos.utils import save_simulation
+from pbd_torch.collision import collide
+from pbd_torch.constants import ROT_IDENTITY
 from pbd_torch.integrator import XPBDIntegrator
-from pbd_torch.model import *
-from pbd_torch.transform import *
-from pbd_torch.utils import *
+from pbd_torch.model import Model
+from pbd_torch.model import Quaternion
+from pbd_torch.model import Vector3
 from tqdm import tqdm
 
 
 def main():
-    time = 0.0
     dt = 0.01
-    n_steps = 200
+    n_steps = 2000
     output_file = os.path.join('simulation', 'sphere.json')
 
     model = Model()
-    integrator = XPBDIntegrator(iterations=1)
+    integrator = XPBDIntegrator(iterations=2)
 
-    # Add robot base
-    box = model.add_sphere(m=1.0,
-                           radius=1.0,
-                           name='sphere',
-                           pos=Vector3(torch.tensor([0.0, 0.0, 3.5])),
-                           rot=Quaternion(ROT_IDENTITY),
-                           n_collision_points=200)
+    sphere = model.add_sphere(m=10.0,
+                              radius=1.0,
+                              name='sphere',
+                              pos=Vector3(torch.tensor([0.0, 0.0, 3.5])),
+                              rot=Quaternion(ROT_IDENTITY),
+                              restitution=0.8,
+                              dynamic_friction=1.0,
+                              n_collision_points=400)
 
     # Add initial rotation to the box
-    model.body_qd[box, :3] = torch.tensor([0.0, 0.0, 0.0])
-    model.body_qd[box, 3:] = torch.tensor([5.0, 0.0, 0.0])
+    model.body_qd[sphere, :3] = torch.tensor([0.0, 0.0, 0.0])
+    model.body_qd[sphere, 3:] = torch.tensor([1.0, 0.0, 2.0])
 
     # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
 
     control = model.control()
 
-    states[0].time = time
-
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc='Simulating'):
-        time += dt
-        states[i + 1].time = time
+        collide(model, states[i], collision_margin=0.1)
         integrator.simulate(model, states[i], states[i + 1], control, dt)
 
     print(f'Saving simulation to {output_file}')

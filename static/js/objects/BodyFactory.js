@@ -59,13 +59,13 @@ function createGeometry(shape) {
         BODY_CONFIG.geometry.cylinder.radialSegments,
         BODY_CONFIG.geometry.cylinder.heightSegments,
       );
+      geometry.rotateX(Math.PI / 2);
       break;
     default:
       console.error("Unknown body shape type:", shape.type);
       return null;
   }
 
-  geometry.rotateX(Math.PI / 2);
   return geometry;
 }
 

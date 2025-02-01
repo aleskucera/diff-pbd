@@ -25,6 +25,7 @@ export function initScene() {
 function createRenderer() {
   const renderer = new THREE.WebGLRenderer({
     antialias: RENDERER_CONFIG.antialias,
+    preserveDrawingBuffer: RENDERER_CONFIG.preserveDrawingBuffer,
   });
 
   renderer.setPixelRatio(RENDERER_CONFIG.pixelRatio);

@@ -1,94 +1,157 @@
 import { GUI } from "three/addons/libs/lil-gui.module.min.js";
 
-let appState = null;
-let gui = null;
+export class UIControls {
+  constructor(app) {
+    this.app = app;
+    this.gui = this.createDatGUI();
+    this.setupKeyboardControls();
+  }
 
-export function initUIControls(appInstance) {
-  appState = appInstance;
-  createDatGUI();
-  // updateVisualizationMode(visualizationMode);
-}
+  createDatGUI() {
+    this.gui = new GUI();
 
-function createDatGUI() {
-  // Create GUI instance
-  gui = new GUI();
+    const controls = {
+      bodyVisualizationMode: this.app.bodyVisualizationMode,
+      showContactPoints: this.app.contactPointsVisible,
+      showContactNormals: this.app.contactNormalsVisible,
+      showAxes: this.app.axesVisible,
+      showLinearVelocity: this.app.bodyVectorVisible.linearVelocity,
+      showAngularVelocity: this.app.bodyVectorVisible.angularVelocity,
+      showLinearForce: this.app.bodyVectorVisible.linearForce,
+      showTorque: this.app.bodyVectorVisible.torque,
+    };
 
-  // Create an object to hold our controls
-  const controls = {
-    bodyVisualizationMode: appState.bodyVisualizationMode,
-    showContactPoints: appState.contactPointsVisible,
-    showContactNormals: appState.contactNormalsVisible,
-  };
+    this.displayFolder = this.gui.addFolder("Display Options");
 
-  // Add controls to GUI
-  const displayFolder = gui.addFolder("Display Options");
+    this.displayFolder
+      .add(controls, "bodyVisualizationMode", ["mesh", "wireframe", "points"])
+      .name("Body Visualization Mode (B)")
+      .onChange((value) => {
+        this.updateVisualizationMode(value);
+      });
 
-  // Add dropdown for visualization mode
-  displayFolder
-    .add(controls, "bodyVisualizationMode", ["mesh", "wireframe", "points"])
-    .name("Body Visualization Mode")
-    .onChange((value) => {
-      updateVisualizationMode(value);
+    this.displayFolder
+      .add(controls, "showAxes")
+      .name("Show Axes (A)")
+      .onChange((value) => {
+        this.updateAxesVisibility(value);
+      });
+
+    this.displayFolder
+      .add(controls, "showContactPoints")
+      .name("Show Contact Points (C)")
+      .onChange((value) => {
+        this.updateContactPointsVisibility(value);
+      });
+
+    // Combined vector controls
+    const vectorControls = [
+      {
+        property: "showLinearVelocity",
+        name: "Show Linear Velocity (V)",
+        type: "linearVelocity",
+      },
+      {
+        property: "showAngularVelocity",
+        name: "Show Angular Velocity (W)",
+        type: "angularVelocity",
+      },
+      {
+        property: "showLinearForce",
+        name: "Show Linear Force (F)",
+        type: "linearForce",
+      },
+      { property: "showTorque", name: "Show Torque (T)", type: "torque" },
+    ];
+
+    vectorControls.forEach((control) => {
+      this.displayFolder
+        .add(controls, control.property)
+        .name(control.name)
+        .onChange((value) => {
+          this.updateVectorVisibility(control.type, value);
+        });
     });
 
-  // Add checkbox for contact points visibility
-  displayFolder
-    .add(controls, "showContactPoints")
-    .name("Show Contact Points")
-    .onChange((value) => {
-      updateContactPointsVisibility(value);
-    });
+    this.displayFolder.open();
+    return this.gui;
+  }
 
-  // Add checkbox for contact normals visibility
-  displayFolder
-    .add(controls, "showContactNormals")
-    .name("Show Contact Normals")
-    .onChange((value) => {
-      updateContactNormalsVisibility(value);
-    });
-
-  displayFolder.open();
-}
-
-function updateVisualizationMode(mode) {
-  Object.values(appState.bodies).forEach((obj) => {
-    obj.children.forEach((child) => {
-      if (child.isMesh) {
-        child.visible = mode === "mesh";
+  setupKeyboardControls() {
+    window.addEventListener("keydown", (event) => {
+      switch (event.key.toLowerCase()) {
+        case "b":
+          const modes = ["mesh", "wireframe", "points"];
+          const currentIndex = modes.indexOf(this.app.bodyVisualizationMode);
+          const nextIndex = (currentIndex + 1) % modes.length;
+          this.updateVisualizationMode(modes[nextIndex]);
+          const controller = this.findController("bodyVisualizationMode");
+          if (controller) controller.setValue(modes[nextIndex]);
+          break;
+        case "a":
+          this.toggleControl("showAxes");
+          break;
+        case "c":
+          this.toggleControl("showContactPoints");
+          break;
+        case "v":
+          this.toggleControl("showLinearVelocity");
+          break;
+        case "w":
+          this.toggleControl("showAngularVelocity");
+          break;
+        case "f":
+          this.toggleControl("showLinearForce");
+          break;
+        case "t":
+          this.toggleControl("showTorque");
+          break;
       }
-      if (child.isWireframe) {
-        child.visible = mode === "wireframe";
-      }
-      if (child.isPoints) {
-        child.visible = mode === "points";
-      }
     });
-  });
-}
+  }
 
-function updateContactPointsVisibility(show) {
-  Object.values(appState.contactPoints).forEach((obj) => {
-    obj.visible = show;
-  });
-  appState.contactPointsVisible = show;
-}
+  findController(property) {
+    for (const controller of this.displayFolder.controllers) {
+      if (controller.property === property) {
+        return controller;
+      }
+    }
+    return null;
+  }
 
-function updateContactNormalsVisibility(show) {
-  Object.values(appState.contactNormals).forEach((obj) => {
-    obj.visible = show;
-  });
-  appState.contactNormalsVisible = show;
-}
+  toggleControl(property) {
+    const controller = this.findController(property);
+    if (controller) {
+      controller.setValue(!controller.getValue());
+    }
+  }
 
-export function getControlState() {
-  return {
-    visualizationMode,
-  };
-}
+  updateVisualizationMode(mode) {
+    this.app.bodies.forEach((body) => {
+      body.updateVisualizationMode(mode);
+    });
+    this.app.bodyVisualizationMode = mode;
+  }
 
-export function destroyGUI() {
-  if (gui) {
-    gui.destroy();
-    gui = null;
+  updateAxesVisibility(show) {
+    this.app.bodies.forEach((body) => {
+      body.toggleAxes(show);
+    });
+    this.app.axesVisible = show;
+  }
+
+  updateContactPointsVisibility(show) {
+    this.app.bodies.forEach((body) => {
+      body.toggleContactPoints(show);
+    });
+    this.app.contactPointsVisible = show;
+  }
+
+  // Combined vector visibility update function
+  updateVectorVisibility(vectorType, show) {
+    this.app.bodies.forEach((body) => {
+      body.toggleBodyVector(vectorType, show);
+    });
+    this.app.bodyVectorVisible[vectorType] = show;
   }
 }

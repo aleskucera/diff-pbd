@@ -12,6 +12,33 @@ export function createPlaybackControls(animationController) {
     borderRadius: "5px",
   });
 
+  // Record button
+  const recordButton = createButton("⚫ REC", () => {
+    if (animationController.isRecording) {
+      animationController.stopRecording();
+      recordButton.textContent = "⚫ REC";
+      recordButton.style.backgroundColor = "#444";
+    } else {
+      animationController.startRecording();
+      recordButton.textContent = "⬛ STOP";
+      recordButton.style.backgroundColor = "#aa0000";
+    }
+  });
+  recordButton.style.marginRight = "10px";
+
+  // Format selector for recording
+  const formatSelect = document.createElement("select");
+  ["webm", "jpg"].forEach((format) => {
+    const option = document.createElement("option");
+    option.value = format;
+    option.text = format.toUpperCase();
+    formatSelect.appendChild(option);
+  });
+  formatSelect.style.marginRight = "10px";
+  formatSelect.addEventListener("change", (e) => {
+    animationController.setRecordingFormat(e.target.value);
+  });
+
   // Play/Pause button
   const playButton = createButton("Play", () => {
     if (animationController.isPlaying) {
@@ -39,7 +66,7 @@ export function createPlaybackControls(animationController) {
 
   // Speed control
   const speedSelect = document.createElement("select");
-  [0.1, 0.25, 0.5, 1, 2].forEach((speed) => {
+  [0.1, 0.25, 0.5, 1, 2, 5].forEach((speed) => {
     const option = document.createElement("option");
     option.value = speed;
     option.text = `${speed}x`;
@@ -61,6 +88,8 @@ export function createPlaybackControls(animationController) {
   }, 100);
 
   [
+    recordButton,
+    formatSelect,
     stepBackButton,
     playButton,
     stepForwardButton,
@@ -72,14 +101,17 @@ export function createPlaybackControls(animationController) {
 
   // Keyboard controls
   document.addEventListener("keydown", (event) => {
-    switch (event.key.toLowerCase()) {
-      case "n":
+    switch (event.key) {
+      case "r": // 'r' key for recording
+        recordButton.click();
+        break;
+      case "ArrowRight": // Right arrow key
         animationController.stepForward();
         break;
-      case "b":
+      case "ArrowLeft": // Left arrow key
         animationController.stepBackward();
         break;
-      case " ":
+      case " ": // Space key
         playButton.click();
         break;
     }

@@ -1,10 +1,13 @@
-import torch
 import numpy as np
-
+import torch
 from pbd_torch.transform import rotvec_to_quat
 
+# Identity transformation
+TRANSFORM_IDENTITY = torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                                  dtype=torch.float32)
+
 # Identity quaternion
-ROT_IDENTITY = torch.tensor([1.0, 0.0, 0.0, 0.0])
+ROT_IDENTITY = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32)
 
 # 45-degree rotations for each axis
 ROT_45_X = rotvec_to_quat(torch.tensor([np.pi / 4, 0.0, 0.0]))
@@ -25,6 +28,15 @@ ROT_90_Z = rotvec_to_quat(torch.tensor([0.0, 0.0, np.pi / 2]))
 ROT_NEG_90_X = rotvec_to_quat(torch.tensor([-np.pi / 2, 0.0, 0.0]))
 ROT_NEG_90_Y = rotvec_to_quat(torch.tensor([0.0, -np.pi / 2, 0.0]))
 ROT_NEG_90_Z = rotvec_to_quat(torch.tensor([0.0, 0.0, -np.pi / 2]))
+
+# 135-degree rotations
+ROT_135_X = rotvec_to_quat(torch.tensor([3 * np.pi / 4, 0.0, 0.0]))
+ROT_135_Y = rotvec_to_quat(torch.tensor([0.0, 3 * np.pi / 4, 0.0]))
+ROT_135_Z = rotvec_to_quat(torch.tensor([0.0, 0.0, 3 * np.pi / 4]))
+
+ROT_NEG_135_X = rotvec_to_quat(torch.tensor([-3 * np.pi / 4, 0.0, 0.0]))
+ROT_NEG_135_Y = rotvec_to_quat(torch.tensor([0.0, -3 * np.pi / 4, 0.0]))
+ROT_NEG_135_Z = rotvec_to_quat(torch.tensor([0.0, 0.0, -3 * np.pi / 4]))
 
 # Half rotations (180 degrees) for each axis
 ROT_180_X = rotvec_to_quat(torch.tensor([np.pi, 0.0, 0.0]))

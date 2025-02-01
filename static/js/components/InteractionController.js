@@ -71,7 +71,7 @@ export class InteractionController {
     this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
     this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
   }
-  // Mouse click handler for selection
+
   onClick() {
     this.raycaster.setFromCamera(this.mouse, this.app.camera);
     const intersects = this.raycaster.intersectObjects(

@@ -1,31 +1,34 @@
 import os
 
 import torch
-from pbd_torch.constants import *
+from demos.utils import save_simulation
+from pbd_torch.collision import collide
+from pbd_torch.constants import ROT_IDENTITY
 from pbd_torch.integrator import XPBDIntegrator
-from pbd_torch.model import *
-from pbd_torch.transform import *
-from pbd_torch.utils import *
+from pbd_torch.model import Model
+from pbd_torch.model import Quaternion
+from pbd_torch.model import Vector3
 from tqdm import tqdm
 
 
 def main():
-    time = 0.0
     dt = 0.01
     n_steps = 200
     output_file = os.path.join('simulation', 'box.json')
 
     model = Model()
-    integrator = XPBDIntegrator(iterations=1)
+    integrator = XPBDIntegrator(iterations=4)
 
     # Add robot base
     box = model.add_box(m=1.0,
-                        hx=1.0,
-                        hy=1.0,
-                        hz=1.0,
+                        hx=0.5,
+                        hy=0.5,
+                        hz=0.5,
                         name='box',
                         pos=Vector3(torch.tensor([0.0, 0.0, 3.5])),
                         rot=Quaternion(ROT_IDENTITY),
+                        restitution=1.0,
+                        dynamic_friction=1.0,
                         n_collision_points=200)
 
     # Add initial rotation to the box
@@ -37,13 +40,10 @@ def main():
 
     control = model.control()
 
-    states[0].time = time
-
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc='Simulating'):
-        states[i + 1].time = time
+        collide(model, states[i], collision_margin=0.1)
         integrator.simulate(model, states[i], states[i + 1], control, dt)
-        time += dt
 
     print(f'Saving simulation to {output_file}')
     save_simulation(model, states, output_file)

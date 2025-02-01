@@ -1,12 +1,7 @@
-from typing import List, Dict
-from dataclasses import dataclass
+from typing import Dict
 
-import torch
-import matplotlib.pyplot as plt
-
-from pbd_torch.transform import *
 from pbd_torch.correction import *
-from pbd_torch.utils import *
+from demos.utils import *
 
 class Trajectory:
     def __init__(self, time: torch.Tensor):

@@ -1,0 +1,26 @@
+<mujoco model="cylinder_simulation">
+    <compiler angle="radian" />
+    <default>
+        <geom solref="0.02 1" solimp="0.9 0.95 0.001" />
+    </default>
+    <option timestep="0.01" integrator="RK4" />
+
+    <worldbody>
+        <!-- Ground plane -->
+        <geom type="plane" size="10 10 0.1" rgba="0.9 0.9 0.9 1" />
+
+        <!-- Cylinder -->
+        <body name="cylinder" pos="0 0 10.5">
+            <geom type="cylinder" size="1 0.1" mass="1.0" rgba="0.8 0.2 0.2 1" />
+            <joint name="free_joint" type="free" />
+        </body>
+    </worldbody>
+
+    <asset>
+        <!-- Optional assets can be added here -->
+    </asset>
+
+    <actuator>
+        <!-- Optional actuators can be added here -->
+    </actuator>
+</mujoco>

@@ -1,9 +1,9 @@
-import numpy as np
 import pytest
 import torch
 from pbd_torch.constants import *
 from pbd_torch.transform import *
 from scipy.spatial.transform import Rotation as R
+
 
 class TestQuaternionMultiplication:
 
@@ -27,22 +27,34 @@ class TestQuaternionMultiplication:
             q_180z, ROT_180_Z,
             atol=1e-6), "90-degree rotation composition failed"
 
-    def test_compare_with_scipy(self):
-        q1 = torch.tensor([0.7071, 0.1421, 0.7421, 0.0], dtype=torch.float32)
-        q2 = torch.tensor([0.7071, 0.0, 1.0, 0.12421], dtype=torch.float32)
-        q1 = q1 / torch.norm(q1)
-        q2 = q2 / torch.norm(q2)
-        q1_scipy = R.from_quat(
-            [q1[1].item(), q1[2].item(), q1[3].item(), q1[0].item()])
-        q2_scipy = R.from_quat(
-            [q2[1].item(), q2[2].item(), q2[3].item(), q2[0].item()])
-        expected = torch.from_numpy(
-            (q1_scipy * q2_scipy).as_quat()).type(q1.dtype)
-        expected = torch.tensor(
-            [expected[3], expected[0], expected[1], expected[2]])
-        result = quat_mul(q1, q2)
-        assert torch.allclose(result, expected,
-                              atol=1e-6), "Scipy comparison failed"
+    @pytest.mark.parametrize("n_tests", [100])  # Number of random tests to run
+    def test_random_quaternions(self, n_tests):
+        for _ in range(n_tests):
+            # Generate random quaternions
+            q1 = torch.randn(4, dtype=torch.float32)
+            q2 = torch.randn(4, dtype=torch.float32)
+
+            # Normalize the quaternions
+            q1 = q1 / torch.norm(q1)
+            q2 = q2 / torch.norm(q2)
+
+            # Convert to scipy format (x, y, z, w) -> (w, x, y, z)
+            q1_scipy = R.from_quat(
+                [q1[1].item(), q1[2].item(), q1[3].item(), q1[0].item()])
+            q2_scipy = R.from_quat(
+                [q2[1].item(), q2[2].item(), q2[3].item(), q2[0].item()])
+
+            # Compute expected result using scipy
+            expected = torch.from_numpy(
+                (q1_scipy * q2_scipy).as_quat()).type(q1.dtype)
+            expected = torch.tensor(
+                [expected[3], expected[0], expected[1], expected[2]])
+
+            # Compute result using your implementation
+            result = quat_mul(q1, q2)
+
+            assert torch.allclose(result, expected, atol=1e-6), \
+                f"Random quaternion multiplication failed:\nq1: {q1}\nq2: {q2}\nExpected: {expected}\nGot: {result}"
 
 
 class TestVectorsRotation:
@@ -51,9 +63,9 @@ class TestVectorsRotation:
         "vector, quaternion, expected",
         [
             (
-                    torch.tensor([1.0, 0.0, 0.0]),
-                    ROT_90_Z,
-                    torch.tensor([0.0, 1.0, 0.0]),
+                torch.tensor([1.0, 0.0, 0.0]),
+                ROT_90_Z,
+                torch.tensor([0.0, 1.0, 0.0]),
             ),
         ],
     )
@@ -94,7 +106,7 @@ class TestVectorsRotation:
             torch.zeros_like(angles),
             torch.sin(angles / 2)
         ],
-            dim=1)
+                            dim=1)
         rotated = rotate_vectors(vectors, quats)
         assert rotated.shape == vectors.shape, "Batch rotation shape mismatch"
 
@@ -160,7 +172,7 @@ class TestRotateVectorsInverse:
             torch.zeros_like(angles),
             torch.sin(angles / 2)
         ],
-            dim=1)
+                            dim=1)
 
         # Rotate vectors
         rotated = rotate_vectors(vectors, quats)
@@ -231,7 +243,7 @@ class TestQuaternionConjugate:
             scipy_conjugate[3], scipy_conjugate[0], scipy_conjugate[1],
             scipy_conjugate[2]
         ],
-            dtype=torch.float32)
+                                dtype=torch.float32)
 
         # Function result
         result = quat_inv(q)
@@ -266,11 +278,12 @@ class TestQuaternionConjugate:
         result = quat_inv(q)
         assert torch.allclose(result, expected, atol=1e-6)
 
+
 class TestRotVecToQuat:
 
     def test_zero_rotation(self):
         """Test conversion of zero rotation vector."""
-        rotvec = torch.zeros(3) 
+        rotvec = torch.zeros(3)
         result = rotvec_to_quat(rotvec)
         expected = torch.tensor([1.0, 0.0, 0.0, 0.0]).type(result.dtype)
         assert torch.allclose(result, expected, atol=1e-6)
@@ -294,6 +307,7 @@ class TestRotVecToQuat:
         for i in range(10):
             single_result = rotvec_to_quat(rotvecs[i])
             assert torch.allclose(single_result, result[i], atol=1e-6)
+
 
 class TestQuatToRotVec:
 
@@ -320,7 +334,8 @@ class TestQuatToRotVec:
         quats = quats / torch.norm(quats, dim=1, keepdim=True)
         result = quat_to_rotvec(quats)
         assert result.shape == (10, 3)
-        
+
+
 class TestQuatToRotMat:
 
     def test_identity_quaternion(self):
@@ -357,8 +372,10 @@ class TestRotMatToQuat:
         result = rotmat_to_quat(rotmat)
         scipy_quat = R.from_matrix(rotmat.numpy()).as_quat()
         expected = torch.tensor(
-            [scipy_quat[3], scipy_quat[0], scipy_quat[1], scipy_quat[2]]).type(result.dtype)
+            [scipy_quat[3], scipy_quat[0], scipy_quat[1],
+             scipy_quat[2]]).type(result.dtype)
         assert torch.allclose(result, expected, atol=1e-6)
+
 
 class TestRelativeRotation:
 
@@ -388,9 +405,11 @@ class TestRelativeRotation:
         result = relative_rotation(q_a, q_b)
         scipy_quat = torch.tensor(R.from_matrix(mat_b @ mat_a.T).as_quat())
         expected = torch.tensor(
-            [scipy_quat[3], scipy_quat[0], scipy_quat[1], scipy_quat[2]]).type(result.dtype)
+            [scipy_quat[3], scipy_quat[0], scipy_quat[1],
+             scipy_quat[2]]).type(result.dtype)
 
         assert torch.allclose(result, expected, atol=1e-6)
+
 
 class TestTransform:
 
@@ -399,7 +418,8 @@ class TestTransform:
         points = torch.tensor([1.0, 0.0, 0.0])
         x = torch.zeros(3)
         q = torch.tensor([1.0, 0.0, 0.0, 0.0])
-        result = transform(points, x, q).type(points.dtype)
+        body_q = torch.cat([x, q])
+        result = transform(points, body_q).type(points.dtype)
         assert torch.allclose(result, points, atol=1e-6)
 
     def test_translation_only(self):
@@ -407,8 +427,9 @@ class TestTransform:
         points = torch.tensor([1.0, 0.0, 0.0])
         x = torch.tensor([0.0, 1.0, 0.0])
         q = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        body_q = torch.cat([x, q])
         expected = torch.tensor([1.0, 1.0, 0.0])
-        result = transform(points, x, q).type(points.dtype)
+        result = transform(points, body_q).type(points.dtype)
         assert torch.allclose(result, expected, atol=1e-6)
 
     def test_rotation_and_translation(self):
@@ -416,27 +437,23 @@ class TestTransform:
         points = torch.tensor([1.0, 0.0, 0.0])
         x = torch.tensor([0.0, 1.0, 0.0])
         q = ROT_90_Z
+        body_q = torch.cat([x, q])
         expected = torch.tensor([0.0, 2.0, 0.0])
-        result = transform(points, x, q).type(points.dtype)
+        result = transform(points, body_q).type(points.dtype)
         assert torch.allclose(result, expected, atol=1e-6)
 
 
 class TestCoordinateTransformations:
+
     @pytest.mark.parametrize(
         "body_v, body_pos, body_rot, world_v",
         [
-            (torch.tensor([1.0, 1.0, 0.0]),
-             torch.tensor([0.0, 0.0, 0.0]),
-             ROT_90_Z,
-             torch.tensor([-1.0, 1.0, 0.0])),
-            (torch.tensor([0.0, 0.0, 0.0]),
-             torch.tensor([1.0, 1.0, 0.0]),
-             ROT_90_Z,
-             torch.tensor([1.0, 1.0, 0.0])),
-            (torch.tensor([-2.0, 0.0, 0.0]),
-             torch.tensor([1.0, 1.0, 0.0]),
-             ROT_IDENTITY,
-             torch.tensor([-1.0, 1.0, 0.0])),
+            (torch.tensor([1.0, 1.0, 0.0]), torch.tensor(
+                [0.0, 0.0, 0.0]), ROT_90_Z, torch.tensor([-1.0, 1.0, 0.0])),
+            (torch.tensor([0.0, 0.0, 0.0]), torch.tensor(
+                [1.0, 1.0, 0.0]), ROT_90_Z, torch.tensor([1.0, 1.0, 0.0])),
+            (torch.tensor([-2.0, 0.0, 0.0]), torch.tensor([1.0, 1.0, 0.0]),
+             ROT_IDENTITY, torch.tensor([-1.0, 1.0, 0.0])),
         ],
     )
     def test_body_to_world(self, body_v, body_pos, body_rot, world_v):
@@ -447,18 +464,12 @@ class TestCoordinateTransformations:
     @pytest.mark.parametrize(
         "world_v, body_pos, body_rot, body_v",
         [
-            (torch.tensor([1.0, 1.0, 0.0]),
-             torch.tensor([0.0, 0.0, 0.0]),
-             ROT_90_Z,
-             torch.tensor([1.0, -1.0, 0.0])),
-            (torch.tensor([1.0, 1.0, 0.0]),
-             torch.tensor([1.0, 1.0, 0.0]),
-             ROT_90_Z,
-             torch.tensor([0.0, 0.0, 0.0])),
-            (torch.tensor([-1.0, 1.0, 0.0]),
-             torch.tensor([1.0, 1.0, 0.0]),
-             ROT_IDENTITY,
-             torch.tensor([-2.0, 0.0, 0.0])),
+            (torch.tensor([1.0, 1.0, 0.0]), torch.tensor(
+                [0.0, 0.0, 0.0]), ROT_90_Z, torch.tensor([1.0, -1.0, 0.0])),
+            (torch.tensor([1.0, 1.0, 0.0]), torch.tensor(
+                [1.0, 1.0, 0.0]), ROT_90_Z, torch.tensor([0.0, 0.0, 0.0])),
+            (torch.tensor([-1.0, 1.0, 0.0]), torch.tensor([1.0, 1.0, 0.0]),
+             ROT_IDENTITY, torch.tensor([-2.0, 0.0, 0.0])),
         ],
     )
     def test_world_to_body(self, world_v, body_pos, body_rot, body_v):
