@@ -17,7 +17,6 @@ export function initScene() {
   const controls = setupControls(camera, renderer);
 
   setupLighting(scene);
-  setupGround(scene);
 
   return { renderer, scene, camera, controls };
 }

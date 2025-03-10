@@ -5,11 +5,9 @@ from typing import List
 from typing import NewType
 from typing import Union
 
-import matplotlib
-import matplotlib.pyplot as plt
 import torch
-from matplotlib.axes import Axes
 from pbd_torch.constants import *
+from pbd_torch.terrain import Terrain
 from pbd_torch.transform import *
 
 # Define new types for the simulation
@@ -189,7 +187,7 @@ class Control:
 
 class Model:
 
-    def __init__(self, device: torch.device = None, requires_grad: bool = False):
+    def __init__(self, device: torch.device = None, requires_grad: bool = False, terrain: Terrain = None):
         self.body_count = 0
         self.joint_count = 0
 
@@ -198,6 +196,8 @@ class Model:
             device = torch.device('cpu')
         self.device = device
         self.requires_grad = requires_grad
+        
+        self.terrain = terrain
 
         # ====================== Body-related attributes ======================
         self.body_name: List[str] = []
@@ -299,8 +299,8 @@ class Model:
         self.contact_point_idx = torch.zeros((0, ),
                                              dtype=torch.int32,
                                              device=device)
+
         # System properties
-        self.ground = True
         self.gravity = torch.tensor([0.0, 0.0, -9.81],
                                     dtype=torch.float32,
                                     device=device)
@@ -592,59 +592,27 @@ class Model:
             self.body_count,
             "joint_count":
             self.joint_count,
-            "gravity":
-            tensor_to_list(self.gravity),
-            "ground":
-            self.ground,
             "bodies": [{
                 "name":
                 self.body_name[i],
                 "shape":
                 self.body_shapes[i].serialize(),
-                "mass":
-                self.body_mass[i].item(),
-                "inv_mass":
-                self.body_inv_mass[i].item(),
                 "q":
                 tensor_to_list(self.body_q[i]),
                 "qd":
                 tensor_to_list(self.body_qd[i]),
                 "f":
                 tensor_to_list(self.body_f[i]),
-                "inertia":
-                tensor_to_list(self.body_inertia[i]),
-                "inv_inertia":
-                tensor_to_list(self.body_inv_inertia[i]),
                 "collision_points":
                 tensor_to_list(
                     self.body_collision_points.get(i, torch.empty(0)))
             } for i in range(self.body_count)],
-            "joints": [{
-                "name": self.joint_name[i],
-                "q": self.joint_q[i].item(),
-                "qd": self.joint_qd[i].item(),
-                "act": self.joint_act[i].item(),
-                "axis": tensor_to_list(self.joint_axis[i]),
-                "parent": self.joint_parent[i].item(),
-                "child": self.joint_child[i].item(),
-                "compliance": self.joint_compliance[i].item(),
-                "X_p": tensor_to_list(self.joint_X_p[i]),
-                "X_c": tensor_to_list(self.joint_X_c[i]),
-            } for i in range(self.joint_count)],
         }
-        if self.is_robot:
-            data["robot"] = {
-                "name": self.robot_name,
-                "q": tensor_to_list(self.robot_q),
-                "qd": tensor_to_list(self.robot_qd),
-                "f": tensor_to_list(self.robot_f),
-                "mass": self.robot_mass.item(),
-                "inv_mass": self.robot_inv_mass.item(),
-                "inertia": tensor_to_list(self.robot_inertia),
-                "inv_inertia": tensor_to_list(self.robot_inv_inertia),
-                "body": tensor_to_list(self.robot_body),
-                "joint": tensor_to_list(self.robot_joint)
-            }
+
+        # Add terrain data if available
+        if self.terrain is not None:
+            data["terrain"] = self.terrain.serialize()
+
         return data
 
 

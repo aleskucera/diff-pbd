@@ -123,7 +123,6 @@ function createHelpOverlay() {
         <h3>Keyboard Controls</h3>
         <ul>
             <li>R - Reset camera</li>
-            <li>F - Toggle fullscreen</li>
             <li>H - Toggle this help menu</li>
         </ul>
         <p>Click anywhere to close</p>
@@ -134,35 +133,6 @@ function createHelpOverlay() {
   });
 
   return overlay;
-}
-
-// Optional: Add performance monitoring
-function setupPerformanceMonitoring() {
-  if (process.env.NODE_ENV === "development") {
-    const stats = new Stats();
-    document.body.appendChild(stats.dom);
-    return stats;
-  }
-  return null;
-}
-
-// Optional: Add responsive design handling
-function handleResponsiveDesign(app) {
-  const breakpoints = {
-    mobile: 480,
-    tablet: 768,
-    desktop: 1024,
-  };
-
-  const width = window.innerWidth;
-
-  if (width <= breakpoints.mobile) {
-    adjustForMobile(app);
-  } else if (width <= breakpoints.tablet) {
-    adjustForTablet(app);
-  } else {
-    adjustForDesktop(app);
-  }
 }
 
 function adjustForMobile(app) {

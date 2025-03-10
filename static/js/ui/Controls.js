@@ -21,23 +21,23 @@ export class UIControls {
       showTorque: this.app.bodyVectorVisible.torque,
     };
 
-    this.displayFolder = this.gui.addFolder("Display Options");
+    this.bodyFolder = this.gui.addFolder("Body Options");
 
-    this.displayFolder
+    this.bodyFolder
       .add(controls, "bodyVisualizationMode", ["mesh", "wireframe", "points"])
       .name("Body Visualization Mode (B)")
       .onChange((value) => {
         this.updateVisualizationMode(value);
       });
 
-    this.displayFolder
+    this.bodyFolder
       .add(controls, "showAxes")
       .name("Show Axes (A)")
       .onChange((value) => {
         this.updateAxesVisibility(value);
       });
 
-    this.displayFolder
+    this.bodyFolder
       .add(controls, "showContactPoints")
       .name("Show Contact Points (C)")
       .onChange((value) => {
@@ -65,7 +65,7 @@ export class UIControls {
     ];
 
     vectorControls.forEach((control) => {
-      this.displayFolder
+      this.bodyFolder
         .add(controls, control.property)
         .name(control.name)
         .onChange((value) => {
@@ -73,7 +73,78 @@ export class UIControls {
         });
     });
 
-    this.displayFolder.open();
+    this.bodyFolder.open();
+
+    // Add terrain controls
+    this.terrainFolder = this.gui.addFolder("Terrain Options");
+
+    // Create terrain controls object
+    const terrainControls = {
+      showSurface: this.app.terrainVisualizationModes?.surface ?? true,
+      showWireframe: this.app.terrainVisualizationModes?.wireframe ?? true,
+      showNormals: this.app.terrainNormalsVisible ?? false,
+      colorMap: this.app.terrain?.currentColorMap || "viridis",
+    };
+
+    // Add terrain visualization toggles
+    this.terrainFolder
+      .add(terrainControls, "showSurface")
+      .name("Show Surface")
+      .onChange((value) => {
+        this.updateTerrainVisualization("surface", value);
+      });
+
+    this.terrainFolder
+      .add(terrainControls, "showWireframe")
+      .name("Show Wireframe")
+      .onChange((value) => {
+        this.updateTerrainVisualization("wireframe", value);
+      });
+
+    this.terrainFolder
+      .add(terrainControls, "showNormals")
+      .name("Show Normals")
+      .onChange((value) => {
+        this.updateTerrainNormals(value);
+      });
+
+    // Add colormap dropdown
+    // Select a reasonable subset of the available colormaps
+    const colorMapOptions = [
+      "viridis",
+      "viridis_r",
+      "plasma",
+      "plasma_r",
+      "inferno",
+      "inferno_r",
+      "magma",
+      "magma_r",
+      "jet",
+      "jet_r",
+      "rainbow",
+      "rainbow_r",
+      "terrain",
+      "terrain_r",
+      "coolwarm",
+      "coolwarm_r",
+      "Spectral",
+      "Spectral_r",
+      "YlGnBu",
+      "YlGnBu_r",
+      "RdYlBu",
+      "RdYlBu_r",
+      "Greys",
+      "Greys_r",
+    ];
+
+    this.terrainFolder
+      .add(terrainControls, "colorMap", colorMapOptions)
+      .name("Color Map")
+      .onChange((value) => {
+        this.updateTerrainColorMap(value);
+      });
+
+    this.terrainFolder.open();
     return this.gui;
   }
 
@@ -111,7 +182,7 @@ export class UIControls {
   }
 
   findController(property) {
-    for (const controller of this.displayFolder.controllers) {
+    for (const controller of this.bodyFolder.controllers) {
       if (controller.property === property) {
         return controller;
       }
@@ -153,5 +224,30 @@ export class UIControls {
       body.toggleBodyVector(vectorType, show);
     });
     this.app.bodyVectorVisible[vectorType] = show;
+  }
+
+  updateTerrainVisualization(type, visible) {
+    if (this.app.terrain) {
+      this.app.terrain.toggleVisualization(type, visible);
+
+      // Update app state
+      if (!this.app.terrainVisualizationModes) {
+        this.app.terrainVisualizationModes = {};
+      }
+      this.app.terrainVisualizationModes[type] = visible;
+    }
+  }
+
+  updateTerrainNormals(show) {
+    if (this.app.terrain) {
+      this.app.terrain.toggleNormalVectors(show);
+      this.app.terrainNormalsVisible = show;
+    }
+  }
+
+  updateTerrainColorMap(colorMap) {
+    if (this.app.terrain) {
+      this.app.terrain.setColorMap(colorMap);
+    }
   }
 }

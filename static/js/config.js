@@ -8,6 +8,12 @@ export const APP_CONFIG = {
     linearForce: false,
     torque: false,
   },
+  terrainVisualizationModes: {
+    surface: true,
+    wireframe: true,
+  },
+  terrainNormalsVisible: false,
+  terrainColorMap: "magma", // Default colormap
 };
 
 export const CONTROLS_CONFIG = {
@@ -62,6 +68,11 @@ export const GROUND_CONFIG = {
   gridColor: 0x888888, // Grid line color
   position: [0, 0, 0], // Position of the ground plane
   rotation: [0, 0, 0], // Rotation of the ground plane
+};
+
+export const TERRAIN_CONFIG = {
+  colorMap: "viridis",
+  showNormals: true,
 };
 
 export const BODY_CONFIG = {

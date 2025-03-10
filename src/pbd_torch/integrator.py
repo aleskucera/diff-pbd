@@ -117,7 +117,7 @@ def get_ground_contact_deltas(
         m_b_inv = torch.zeros(1, device=device)
         I_b_inv = torch.zeros(3, 3, device=device)
 
-        if r_a_world[2] >= 0:
+        if r_a_world[2] - r_b_world[2] >= 0:
             continue
 
         dbody_q, _, d_lambda = positional_delta(body_q_a=body_q[b],

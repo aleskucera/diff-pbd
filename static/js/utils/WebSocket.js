@@ -1,5 +1,6 @@
-import { createBody } from "../objects/BodyFactory.js";
 import { Body } from "../objects/Body.js";
+import { FlatGround } from "../objects/FlatGround.js";
+import { Terrain } from "../objects/Terrain.js";
 import { createPlaybackControls } from "../ui/PlaybackControls.js";
 
 export function setupWebSocket(app) {
@@ -49,6 +50,18 @@ function handleModel(model, app) {
       app.scene.add(body.getObject3D());
     }
   });
+
+  // Handle ground visualization with clean approach
+  if (model.terrain) {
+    console.log("Using terrain data");
+    app.terrain = new Terrain(model.terrain);
+    app.scene.add(app.terrain.getObject3D());
+  } else {
+    console.warn("No terrain data provided, defaulting to flat ground");
+    app.ground = new FlatGround();
+    app.scene.add(app.ground.getObject3D());
+  }
+
   app.bodyStateWindow.update();
 }
 

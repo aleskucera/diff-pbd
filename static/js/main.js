@@ -19,6 +19,10 @@ let app = {
 
   selectedObjects: new Set(),
 
+  // Ground
+  ground: null,
+  terrain: null,
+
   // Body objects
   bodies: new Map(),
   selectedBodies: new Set(),
@@ -34,6 +38,13 @@ let app = {
     linearForce: APP_CONFIG.bodyVectorVisible.linearForce,
     torque: APP_CONFIG.bodyVectorVisible.torque,
   },
+
+  terrainVisualizationModes: {
+    surface: APP_CONFIG.terrainVisualizationModes.surface,
+    wireframe: APP_CONFIG.terrainVisualizationModes.wireframe,
+  },
+  terrainNormalsVisible: APP_CONFIG.terrainNormalsVisible,
+  terrainColorMap: APP_CONFIG.terrainColorMap,
 };
 
 function init() {
