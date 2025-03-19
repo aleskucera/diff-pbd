@@ -9,6 +9,8 @@ import torch
 from pbd_torch.constants import *
 from pbd_torch.terrain import Terrain
 from pbd_torch.transform import *
+from pbd_torch.utils import *
+from pbd_torch.utils import box_inertia
 
 # Define new types for the simulation
 Vector3 = NewType("Vector3", torch.Tensor)  # (3, ) tensor
@@ -60,32 +62,24 @@ class State:
         self.time = 0.0
 
         # Body-related attributes
-        self.body_q = torch.zeros((0, 7), dtype=torch.float32)
-        self.body_qd = torch.zeros((0, 6), dtype=torch.float32)
-        self.body_f = torch.zeros((0, 6), dtype=torch.float32)
+        self.body_q: torch.Tensor = None  # [body_count, 7, 1]
+        self.body_qd: torch.Tensor = None  # [body_count, 6, 1]
+        self.body_f: torch.Tensor = None  # [body_count, 6, 1]
 
         # Joint-related attributes
-        self.joint_q = torch.zeros((0, 7), dtype=torch.float32)
-        self.joint_qd = torch.zeros((0, 6), dtype=torch.float32)
-        self.joint_f = torch.zeros((0,), dtype=torch.float32)
-        self.joint_act = torch.zeros((0,), dtype=torch.float32)
+        self.joint_q: torch.Tensor = None  # [joint_count, 1]
+        self.joint_qd: torch.Tensor = None  # [joint_count, 1]
+        self.joint_act: torch.Tensor = None  # [joint_count, 1]
 
-        # Collision-related attributes
-        self.contact_count = 0
-        self.max_contacts_per_body = 0
-        self.contact_body = torch.zeros((0,), dtype=torch.int32)
-        self.contact_point = torch.zeros((0, 3), dtype=torch.float32)
-        self.contact_normal = torch.zeros((0, 3), dtype=torch.float32)
-        self.contact_point_idx = torch.zeros((0,), dtype=torch.int32)
-        self.contact_point_ground = torch.zeros((0, 3), dtype=torch.float32)
-
-        # Correction-related attributes
-        self.contact_deltas = torch.zeros((0, 7), dtype=torch.float32)
-        self.restitution_deltas = torch.zeros((0, 6), dtype=torch.float32)
-        self.static_friction_deltas = torch.zeros((0, 6), dtype=torch.float32)
-        self.dynamic_friction_deltas = torch.zeros((0, 6), dtype=torch.float32)
-
-        self.robot_contact_deltas = torch.zeros((0, 7), dtype=torch.float32)
+        # Contact points: Contact points are vectors from the center of mass of the body to the contact point. They are stored in the body frame.
+        # Contact normals: Contact normals are vectors in which direction the contact force is applied (from body A towards body B). They are stored in the body frame.
+        self.contact_mask: torch.Tensor = None  # [body_count, max_contacts]
+        self.contact_normals: torch.Tensor = None  # [body_count, max_contacts, 3, 1]
+        self.contact_points: torch.Tensor = None  # [body_count, max_contacts, 3, 1]
+        self.contact_point_indices: torch.Tensor = None  # [body_count, max_contacts]
+        self.contact_points_ground: torch.Tensor = (
+            None  # [body_count, max_contacts, 3, 1]
+        )
 
     @property
     def body_count(self):
@@ -100,20 +94,26 @@ class State:
         def tensor_to_list(tensor):
             return tensor.detach().cpu().tolist() if tensor.numel() > 0 else []
 
-        contacts = [
-            self.contact_point_idx[torch.where(self.contact_body == b)[0]]
-            for b in range(self.body_count)
-        ]
+        # How to keep the tensor of the similar shape?
+        if self.contact_point_indices is not None:
+            contacts = [
+                self.contact_point_indices[i][self.contact_mask[i]]
+                for i in range(self.body_count)
+            ]
+        else:
+            contacts = [
+                torch.zeros(0, dtype=torch.int32) for _ in range(self.body_count)
+            ]
 
         data = {
             "time": self.time,
             "bodies": [
                 {
                     "name": model.body_name[i],
-                    "q": tensor_to_list(self.body_q[i]),
-                    "qd": tensor_to_list(self.body_qd[i]),
+                    "q": tensor_to_list(self.body_q[i].squeeze(1)),
+                    "qd": tensor_to_list(self.body_qd[i].squeeze(1)),
                     "contacts": tensor_to_list(contacts[i]),
-                    "f": tensor_to_list(self.body_f[i]),
+                    "f": tensor_to_list(self.body_f[i].squeeze(1)),
                 }
                 for i in range(self.body_count)
             ],
@@ -132,20 +132,18 @@ class Model:
 
     def __init__(
         self,
-        device: torch.device = None,
+        device: torch.device = torch.device("cpu"),
         requires_grad: bool = False,
         terrain: Terrain = None,
         dynamic_friction_threshold: float = 0.0,
         max_contacts_per_body: int = 20,
     ):
-        # Set the device
-        if device is None:
-            device = torch.device("cpu")
         self.device = device
         self.requires_grad = requires_grad
 
         self.terrain = terrain
 
+        self.max_contacts_per_body = max_contacts_per_body
         self.dynamic_friction_threshold = dynamic_friction_threshold
 
         # ====================== Body-related attributes ======================
@@ -153,97 +151,82 @@ class Model:
         self.body_shapes: List[Shape] = []
 
         self.body_q = torch.zeros(
-            (0, 7), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 7, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 7, 1]
         self.body_qd = torch.zeros(
-            (0, 6), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 6, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 6, 1]
         self.body_f = torch.zeros(
-            (0, 6), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 6, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 6, 1]
 
         self.body_mass = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 1]
         self.body_inv_mass = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
-        self.body_restitution = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 1]
         self.body_inertia = torch.zeros(
             (0, 3, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+        )  # [body_count, 3, 3]
         self.body_inv_inertia = torch.zeros(
             (0, 3, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+        )  # [body_count, 3, 3]
         self.body_collision_points: dict[int, torch.Tensor] = {}
-
-        self.coll_points = torch.zeros((0, 3), dtype=torch.float32, device=device)
+        self.coll_points = torch.zeros((0, 3, 1), dtype=torch.float32, device=device)
         self.coll_points_body_idx = torch.zeros((0,), dtype=torch.int32, device=device)
 
         self.restitution = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 1]
         self.static_friction = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 1]
         self.dynamic_friction = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+        )  # [body_count, 1]
 
         # ====================== Joint-related attributes ======================
         self.joint_name = []
         self.joint_q = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_qd = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_act = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
-        self.joint_axis_mode = torch.zeros((0,), dtype=torch.int32, device=device)
+        self.joint_axis_mode = torch.zeros((0, 1), dtype=torch.int32, device=device)
         self.joint_ke = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_kd = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_parent = torch.zeros((0,), dtype=torch.int32, device=device)
         self.joint_child = torch.zeros((0,), dtype=torch.int32, device=device)
 
         self.joint_X_p = torch.zeros(
-            (0, 7), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 7, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_X_c = torch.zeros(
-            (0, 7), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 7, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_axis = torch.zeros(
-            (0, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 3, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_basis = torch.zeros(
             (0, 3, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
         self.joint_compliance = torch.zeros(
-            (0,), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
-
-        # ====================== Contact-related attributes ======================
-        self.max_contacts_per_body = max_contacts_per_body
-        self.contact_count = 0
-        self.contact_body = torch.zeros((0,), dtype=torch.int32, device=device)
-        self.contact_point = torch.zeros((0, 3), dtype=torch.float32, device=device)
-        self.contact_normal = torch.zeros((0, 3), dtype=torch.float32, device=device)
-        self.contact_point_idx = torch.zeros((0,), dtype=torch.int32, device=device)
-        self.contact_point_ground = torch.zeros(
-            (0, 3), dtype=torch.float32, device=device
+            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
 
         # System properties
         self.gravity = torch.tensor(
-            [0.0, 0.0, -9.81], dtype=torch.float32, device=device
-        )
+            [0.0, 0.0, 0.0, 0.0, 0.0, -9.81], dtype=torch.float32, device=device
+        ).view(6, 1)
 
     @property
     def body_count(self):
@@ -255,7 +238,9 @@ class Model:
 
     @property
     def mass_matrix(self):
-        identity_blocks = torch.eye(3, device=self.device).unsqueeze(0).repeat(self.body_count, 1, 1)
+        identity_blocks = (
+            torch.eye(3, device=self.device).unsqueeze(0).repeat(self.body_count, 1, 1)
+        )
         mass_blocks = identity_blocks * self.body_mass.view(-1, 1, 1)
 
         mass_matrix = torch.zeros((self.body_count, 6, 6), device=self.device)
@@ -265,16 +250,15 @@ class Model:
 
         return mass_matrix
 
-
     def _append_body_mass(self, m: float):
         assert m > 0, "Body mass must be positive"
         assert isinstance(m, float), "Body mass must be a float"
 
-        body_mass = torch.tensor([m], device=self.device)
+        body_mass = torch.tensor([m], device=self.device).view(1, 1)
         self.body_mass = torch.cat([self.body_mass, body_mass]).requires_grad_(
             self.requires_grad
         )
-        body_inv_mass = torch.tensor([1 / m], device=self.device)
+        body_inv_mass = torch.tensor([1 / m], device=self.device).view(1, 1)
         self.body_inv_mass = torch.cat(
             [self.body_inv_mass, body_inv_mass]
         ).requires_grad_(self.requires_grad)
@@ -313,34 +297,28 @@ class Model:
         self.body_shapes.append(Box(hx=hx, hy=hy, hz=hz))
         self.body_name.append(name or f"body_{self.body_count}")
 
-        body_q = torch.cat([pos, rot]).unsqueeze(0).to(self.device)
+        body_q = torch.cat([pos, rot]).view(1, 7, 1).to(self.device)  # [1, 7, 1]
         self.body_q = torch.cat([self.body_q, body_q]).requires_grad_(
             self.requires_grad
         )
-        doby_qd = torch.zeros((1, 6), device=self.device)
+        doby_qd = torch.zeros((1, 6, 1), device=self.device)  # [1, 6, 1]
         self.body_qd = torch.cat([self.body_qd, doby_qd]).requires_grad_(
             self.requires_grad
         )
-        body_f = torch.zeros((1, 6), device=self.device)
+        body_f = torch.zeros((1, 6, 1), device=self.device)  # [1, 6, 1]
         self.body_f = torch.cat([self.body_f, body_f]).requires_grad_(
             self.requires_grad
         )
 
         self._append_body_mass(m)
-        inertia = torch.tensor(
-            [
-                [m / 12 * (hy**2 + hz**2), 0.0, 0.0],
-                [0.0, m / 12 * (hx**2 + hz**2), 0.0],
-                [0.0, 0.0, m / 12 * (hx**2 + hy**2)],
-            ],
-            device=self.device,
-            requires_grad=self.requires_grad,
-        )
+        inertia = box_inertia(hx, hy, hz, m, self.device, self.requires_grad)  # [3, 3]
         self._append_body_inertia(inertia)
 
-        coll_points = box_collision_points(hx, hy, hz, n_collision_points, self.device)
+        coll_points = box_collision_points(
+            hx, hy, hz, n_collision_points, self.device
+        )  # [n, 3]
         self.body_collision_points[body_idx] = coll_points
-        self.coll_points = torch.cat([self.coll_points, coll_points])
+        self.coll_points = torch.cat([self.coll_points, coll_points.unsqueeze(-1)])
         self.coll_points_body_idx = torch.cat(
             [
                 self.coll_points_body_idx,
@@ -348,15 +326,15 @@ class Model:
             ]
         )
 
-        r = torch.tensor([restitution], device=self.device)
+        r = torch.tensor([restitution], device=self.device).view(1, 1)
         self.restitution = torch.cat([self.restitution, r]).requires_grad_(
             self.requires_grad
         )
-        s = torch.tensor([static_friction], device=self.device)
+        s = torch.tensor([static_friction], device=self.device).view(1, 1)
         self.static_friction = torch.cat([self.static_friction, s]).requires_grad_(
             self.requires_grad
         )
-        d = torch.tensor([dynamic_friction], device=self.device)
+        d = torch.tensor([dynamic_friction], device=self.device).view(1, 1)
         self.dynamic_friction = torch.cat([self.dynamic_friction, d]).requires_grad_(
             self.requires_grad
         )
@@ -383,34 +361,28 @@ class Model:
         self.body_shapes.append(Sphere(radius=radius))
         self.body_name.append(name or f"body_{self.body_count}")
 
-        body_q = torch.cat([pos, rot]).unsqueeze(0).to(self.device)
+        body_q = torch.cat([pos, rot]).to(self.device).view(1, 7, 1)
         self.body_q = torch.cat([self.body_q, body_q]).requires_grad_(
             self.requires_grad
         )
-        doby_qd = torch.zeros((1, 6), device=self.device)
+        doby_qd = torch.zeros((1, 6, 1), device=self.device)
         self.body_qd = torch.cat([self.body_qd, doby_qd]).requires_grad_(
             self.requires_grad
         )
-        body_f = torch.zeros((1, 6), device=self.device)
+        body_f = torch.zeros((1, 6, 1), device=self.device)
         self.body_f = torch.cat([self.body_f, body_f]).requires_grad_(
             self.requires_grad
         )
 
         self._append_body_mass(m)
-        inertia = torch.tensor(
-            [
-                [2 / 5 * m * radius, 0.0, 0.0],
-                [0.0, 2 / 5 * m * radius, 0.0],
-                [0.0, 0.0, 2 / 5 * m * radius],
-            ],
-            device=self.device,
-            requires_grad=self.requires_grad,
-        )
+        inertia = sphere_inertia(radius, m, self.device, self.requires_grad)  # [3, 3]
         self._append_body_inertia(inertia)
 
-        coll_points = sphere_collision_points(radius, n_collision_points, self.device)
+        coll_points = sphere_collision_points(
+            radius, n_collision_points, self.device
+        )  # [n, 3]
         self.body_collision_points[body_idx] = coll_points
-        self.coll_points = torch.cat([self.coll_points, coll_points])
+        self.coll_points = torch.cat([self.coll_points, coll_points.unsqueeze(-1)])
         self.coll_points_body_idx = torch.cat(
             [
                 self.coll_points_body_idx,
@@ -418,15 +390,15 @@ class Model:
             ]
         )
 
-        r = torch.tensor([restitution], device=self.device)
+        r = torch.tensor([restitution], device=self.device).view(1, 1)
         self.restitution = torch.cat([self.restitution, r]).requires_grad_(
             self.requires_grad
         )
-        s = torch.tensor([static_friction], device=self.device)
+        s = torch.tensor([static_friction], device=self.device).view(1, 1)
         self.static_friction = torch.cat([self.static_friction, s]).requires_grad_(
             self.requires_grad
         )
-        d = torch.tensor([dynamic_friction], device=self.device)
+        d = torch.tensor([dynamic_friction], device=self.device).view(1, 1)
         self.dynamic_friction = torch.cat([self.dynamic_friction, d]).requires_grad_(
             self.requires_grad
         )
@@ -456,22 +428,15 @@ class Model:
         self.body_shapes.append(Cylinder(radius=radius, height=height))
         self.body_name.append(name or f"body_{self.body_count}")
 
-        body_q = torch.cat([pos, rot]).unsqueeze(0).to(self.device)
+        body_q = torch.cat([pos, rot]).to(self.device).view(1, 7)
         self.body_q = torch.cat([self.body_q, body_q])
-        doby_qd = torch.zeros((1, 6), device=self.device)
+        doby_qd = torch.zeros((1, 6, 1), device=self.device)
         self.body_qd = torch.cat([self.body_qd, doby_qd])
-        body_f = torch.zeros((1, 6), device=self.device)
+        body_f = torch.zeros((1, 6, 1), device=self.device)
         self.body_f = torch.cat([self.body_f, body_f])
 
         self._append_body_mass(m)
-        inertia = torch.tensor(
-            [
-                [m * (3 * radius**2 + height**2) / 12, 0.0, 0.0],
-                [0.0, m * (3 * radius**2 + height**2) / 12, 0.0],
-                [0.0, 0.0, m * radius**2 / 2],
-            ],
-            device=self.device,
-        )
+        inertia = cylinder_inertia(radius, height, m, self.device, self.requires_grad)
         self._append_body_inertia(inertia)
 
         coll_points = cylinder_collision_points(
@@ -480,9 +445,9 @@ class Model:
             n_collision_points_base,
             n_collision_points_surface,
             self.device,
-        )
+        )  # [n, 3]
         self.body_collision_points[body_idx] = coll_points
-        self.coll_points = torch.cat([self.coll_points, coll_points])
+        self.coll_points = torch.cat([self.coll_points, coll_points.unsqueeze(-1)])
         self.coll_points_body_idx = torch.cat(
             [
                 self.coll_points_body_idx,
@@ -490,11 +455,11 @@ class Model:
             ]
         )
 
-        r = torch.tensor([restitution], device=self.device)
+        r = torch.tensor([restitution], device=self.device).view(1, 1)
         self.restitution = torch.cat([self.restitution, r])
-        s = torch.tensor([static_friction], device=self.device)
+        s = torch.tensor([static_friction], device=self.device).view(1, 1)
         self.static_friction = torch.cat([self.static_friction, s])
-        d = torch.tensor([dynamic_friction], device=self.device)
+        d = torch.tensor([dynamic_friction], device=self.device).view(1, 1)
         self.dynamic_friction = torch.cat([self.dynamic_friction, d])
 
         return body_idx
@@ -519,13 +484,12 @@ class Model:
         self.joint_name.append(name or f"joint_{self.joint_count}")
 
         # Add joint properties
-        self.joint_q = torch.cat([self.joint_q, torch.tensor([q], device=self.device)])
-        self.joint_qd = torch.cat(
-            [self.joint_qd, torch.tensor([qd], device=self.device)]
-        )
-        self.joint_act = torch.cat(
-            [self.joint_act, torch.tensor([act], device=self.device)]
-        )
+        joint_q = torch.tensor([q], device=self.device).view(1, 1)
+        self.joint_q = torch.cat([self.joint_q, joint_q])
+        joint_qd = torch.tensor([qd], device=self.device).view(1, 1)
+        self.joint_qd = torch.cat([self.joint_qd, joint_qd])
+        joint_act = torch.tensor([act], device=self.device)
+        self.joint_act = torch.cat([self.joint_act, joint_act])
 
         # Add parent and child indices
         self.joint_parent = torch.cat(
@@ -538,16 +502,14 @@ class Model:
         # Add joint axis
         joint_axis = (axis / torch.norm(axis)).to(self.device)
         self.joint_axis = torch.cat([self.joint_axis, joint_axis.unsqueeze(0)])
-        joint_basis = _create_orthogonal_basis(joint_axis)
-        self.joint_basis = torch.cat([self.joint_basis, joint_basis.unsqueeze(0)])
 
         # Add joint compliance
         self.joint_compliance = torch.cat(
             [self.joint_compliance, torch.tensor([compliance], device=self.device)]
         )
 
-        parent_xform = parent_xform.unsqueeze(0).to(self.device)
-        child_xform = child_xform.unsqueeze(0).to(self.device)
+        parent_xform = parent_xform.to(self.device).view(1, 7, 1)
+        child_xform = child_xform.to(self.device).view(1, 7, 1)
         # Initialize joint transforms (you might want to modify these based on your needs)
         self.joint_X_p = torch.cat([self.joint_X_p, parent_xform])
         self.joint_X_c = torch.cat([self.joint_X_c, child_xform])
@@ -594,9 +556,9 @@ class Model:
                 {
                     "name": self.body_name[i],
                     "shape": self.body_shapes[i].serialize(),
-                    "q": tensor_to_list(self.body_q[i]),
-                    "qd": tensor_to_list(self.body_qd[i]),
-                    "f": tensor_to_list(self.body_f[i]),
+                    "q": tensor_to_list(self.body_q[i].squeeze(1)),
+                    "qd": tensor_to_list(self.body_qd[i].squeeze(1)),
+                    "f": tensor_to_list(self.body_f[i].squeeze(1)),
                     "collision_points": tensor_to_list(
                         self.body_collision_points.get(i, torch.empty(0))
                     ),
@@ -610,166 +572,3 @@ class Model:
             data["terrain"] = self.terrain.serialize()
 
         return data
-
-
-def _create_orthogonal_basis(first_axis: torch.Tensor):
-    assert len(first_axis.shape) == 1, "Start vector must be a 1D tensor"
-    assert first_axis.shape[0] == 3, "Start vector must be a 3D vector"
-    assert torch.norm(first_axis) > 0, "Start vector must be non-zero"
-
-    first_axis = first_axis / torch.norm(first_axis)
-
-    # Initialize basis list with the first normalized vector
-    basis = [first_axis]
-
-    rand_vector = torch.tensor([0.0, 0.0, -1.0], device=first_axis.device)
-    if torch.linalg.cross(first_axis, rand_vector).norm() < 1e-6:
-        rand_vector = torch.tensor([0.0, -1.0, 0.0], device=first_axis.device)
-
-    # Generate a vector orthogonal to the first vector
-    second_axis = torch.linalg.cross(first_axis, rand_vector)
-    basis.append(second_axis)
-
-    # Generate a vector orthogonal to the first two vectors
-    third_axis = torch.linalg.cross(first_axis, second_axis)
-    basis.append(third_axis / torch.norm(third_axis))
-
-    return torch.stack(basis, dim=1)
-
-
-def _generate_fibonacci_sphere_points(radius: float, n_points: int):
-    indices = torch.arange(n_points, dtype=torch.float32)
-
-    # Golden ratio constant
-    phi = (torch.sqrt(torch.tensor(5.0)) - 1) / 2
-
-    # Calculate z coordinates
-    z = (2 * indices + 1) / n_points - 1
-
-    # Calculate radius at each z
-    radius_at_z = torch.sqrt(1 - z * z)
-
-    # Calculate angles
-    theta = 2 * torch.pi * indices * phi
-
-    # Calculate x, y, z coordinates
-    x = radius * radius_at_z * torch.cos(theta)
-    y = radius * radius_at_z * torch.sin(theta)
-    z = radius * z
-
-    # Stack coordinates
-    points = torch.stack([x, y, z], dim=1)
-
-    return points
-
-
-def _generate_fibonacci_surface_points(radius: float, height: float, n_points: int):
-    """Generate uniformly distributed points on cylinder surface using Fibonacci spiral."""
-    golden_ratio = (1 + torch.sqrt(torch.tensor(5.0))) / 2
-
-    points = []
-    for i in range(n_points):
-        z = height * (i / (n_points - 1) - 0.5)
-        theta = 2 * torch.pi * i / golden_ratio
-
-        x = radius * torch.cos(theta)
-        y = radius * torch.sin(theta)
-        points.append([x, y, z])
-
-    return torch.tensor(points)
-
-
-def _generate_fibonacci_disk_points(radius: float, n_points: int):
-    """Generate uniformly distributed points on circle using sunflower pattern."""
-    golden_angle = torch.pi * (3 - torch.sqrt(torch.tensor(5.0)))
-
-    indices = torch.arange(n_points, dtype=torch.float32)
-    r = radius * torch.sqrt(indices / n_points)
-    theta = indices * golden_angle
-
-    x = r * torch.cos(theta)
-    y = r * torch.sin(theta)
-
-    return torch.stack([x, y], dim=1)
-
-
-def sphere_collision_points(
-    radius: float, n_points: int, device: torch.device = torch.device("cpu")
-):
-    return _generate_fibonacci_sphere_points(radius, n_points).to(device)
-
-
-def cylinder_collision_points(
-    radius: float,
-    height: float,
-    n_base_points: int,
-    n_surface_points: int,
-    device: torch.device = torch.device("cpu"),
-):
-    base_points = _generate_fibonacci_disk_points(radius, n_base_points)
-    surface_vertices = _generate_fibonacci_surface_points(
-        radius, height, n_surface_points
-    )
-
-    # Create top and bottom vertices for the bases
-    top_vertices = torch.cat(
-        [base_points, torch.ones(len(base_points), 1) * height / 2], dim=1
-    )
-
-    bottom_vertices = torch.cat(
-        [base_points, torch.ones(len(base_points), 1) * -height / 2], dim=1
-    )
-
-    # Combine all vertices
-    vertices = torch.cat([surface_vertices, top_vertices, bottom_vertices], dim=0).type(
-        torch.float32
-    )
-
-    return vertices.to(device)
-
-
-def box_collision_points(
-    hx: float,
-    hy: float,
-    hz: float,
-    n_points: int,
-    device: torch.device = torch.device("cpu"),
-):
-    points = []
-    points_per_face = n_points // 6
-
-    # Generate points for each face
-    # Front and back faces (YZ planes)
-    for x in [-hx, hx]:
-        y = torch.linspace(-hy, hy, int(torch.sqrt(torch.tensor(points_per_face))))
-        z = torch.linspace(-hz, hz, int(torch.sqrt(torch.tensor(points_per_face))))
-        Y, Z = torch.meshgrid(y, z, indexing="ij")
-        face_points = torch.stack(
-            [torch.full_like(Y, x).flatten(), Y.flatten(), Z.flatten()], dim=1
-        )
-        points.append(face_points)
-
-    # Left and right faces (XZ planes)
-    for y in [-hy, hy]:
-        x = torch.linspace(-hx, hx, int(torch.sqrt(torch.tensor(points_per_face))))
-        z = torch.linspace(-hz, hz, int(torch.sqrt(torch.tensor(points_per_face))))
-        X, Z = torch.meshgrid(x, z, indexing="ij")
-        face_points = torch.stack(
-            [X.flatten(), torch.full_like(X, y).flatten(), Z.flatten()], dim=1
-        )
-        points.append(face_points)
-
-    # Top and bottom faces (XY planes)
-    for z in [-hz, hz]:
-        x = torch.linspace(-hx, hx, int(torch.sqrt(torch.tensor(points_per_face))))
-        y = torch.linspace(-hy, hy, int(torch.sqrt(torch.tensor(points_per_face))))
-        X, Y = torch.meshgrid(x, y, indexing="ij")
-        face_points = torch.stack(
-            [X.flatten(), Y.flatten(), torch.full_like(X, z).flatten()], dim=1
-        )
-        points.append(face_points)
-
-    points = torch.cat(points, dim=0)
-    points = torch.unique(points, dim=0)
-
-    return points.to(device)

@@ -66,6 +66,7 @@ function handleModel(model, app) {
 }
 
 function handleStates(states, app) {
+  console.debug("Received states:", states);
   try {
     console.debug("Received states:", states);
   } catch (error) {

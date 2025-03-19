@@ -256,43 +256,41 @@ class SemiImplicitEulerIntegrator:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Integrates all bodies with angular velocities in local/body frame."""
         # Extract components for all bodies at once
-        x0 = body_q[:, :3]  # Positions [N, 3]
-        q0 = body_q[:, 3:]  # Rotations [N, 4]
-        v0 = body_qd[:, 3:]  # Linear velocities [N, 3]
-        w0 = body_qd[:, :3]  # Angular velocities (local frame) [N, 3]
-        t0 = body_f[:, :3]  # Torques [N, 3]
-        f0 = body_f[:, 3:]  # Linear forces [N, 3]
+        x0 = body_q[:, :3]  # Positions [N, 3, 1]
+        q0 = body_q[:, 3:]  # Rotations [N, 4, 1]
+        v0 = body_qd[:, 3:]  # Linear velocities [N, 3, 1]
+        w0 = body_qd[:, :3]  # Angular velocities (local frame) [N, 3, 1]
+        t0 = body_f[:, :3]  # Torques [N, 3, 1]
+        f0 = body_f[:, 3:]  # Linear forces [N, 3, 1]
 
         # Integrate linear velocity and position for all bodies
-        v1 = v0 + (f0 * body_inv_mass.unsqueeze(1) + gravity.unsqueeze(0)) * dt
-        x1 = x0 + v1 * dt
+        v1 = v0 + (f0 * body_inv_mass + gravity[3:]) * dt # [N, 3, 1]
+        x1 = x0 + v1 * dt # [N, 3, 1]
 
         # Coriolis force and angular velocity integration in local frame
-        I_w = torch.bmm(body_inv_inertia, w0.unsqueeze(2)).squeeze(2)  # [N, 3]
-        c = torch.cross(w0, I_w, dim=1)  # [N, 3]
+        I_w = torch.bmm(body_inv_inertia, w0)  # [N, 3, 1]
+        c = torch.cross(w0, I_w, dim=1)  # [N, 3, 1]
 
         # Angular velocity integration (still in local frame)
-        w1 = (
-            w0 + torch.bmm(body_inv_inertia, (t0 - c).unsqueeze(2)).squeeze(2) * dt
-        )  # [N, 3]
+        w1 = w0 + torch.bmm(body_inv_inertia, t0 - c) * dt # [N, 3, 1]
 
         # Convert local angular velocities to world frame for quaternion integration
-        w1_w = rotate_vectors_batch(w1, q0)  # [N, 3]
+        w1_w = rotate_vectors_batch(w1, q0)  # [N, 3, 1]
 
         # Create quaternions from angular velocities
-        zeros = torch.zeros(w1_w.shape[0], 1, device=w1_w.device)
-        w1_w_quat = torch.cat([zeros, w1_w], dim=1)  # [N, 4]
+        zeros = torch.zeros((w1_w.shape[0], 1, 1), device=w1_w.device)
+        w1_w_quat = torch.cat([zeros, w1_w], dim=1)  # [N, 4, 1]
 
         # Batch quaternion multiplication
-        q_dot = 0.5 * quat_mul_batch(w1_w_quat, q0)
+        q_dot = 0.5 * quat_mul_batch(w1_w_quat, q0) # [N, 4, 1]
 
-        q1 = q0 + q_dot * dt
+        q1 = q0 + q_dot * dt # [N, 4, 1]
 
         # Normalize all quaternions at once
-        q1_norm = normalize_quat_batch(q1)
+        q1_norm = normalize_quat_batch(q1) # [N, 4, 1]
 
         # Assemble final states
-        new_body_q = torch.cat([x1, q1_norm], dim=1)
-        new_body_qd = torch.cat([w1, v1], dim=1)
+        new_body_q = torch.cat([x1, q1_norm], dim=1) # [N, 7, 1]
+        new_body_qd = torch.cat([w1, v1], dim=1) # [N, 6, 1]
 
         return new_body_q, new_body_qd

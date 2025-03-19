@@ -55,10 +55,8 @@ function init() {
   setupWindowHandlers(app);
 
   app.uiControls = new UIControls(app);
-
   app.bodyStateWindow = new BodyStateWindow(app);
   app.animationController = new AnimationController(app);
-  // app.interactionController = new InteractionController(app);
 
   animate();
 }

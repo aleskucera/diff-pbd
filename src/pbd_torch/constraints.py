@@ -24,20 +24,26 @@ def skew_symmetric_matrix_batch(vectors: torch.Tensor) -> torch.Tensor:
     return skew
 
 
-def C_penetration(
-    body_q_a: torch.Tensor,
-    body_q_b: torch.Tensor,
-    r_a: torch.Tensor,
-    r_b: torch.Tensor,
-    n: torch.Tensor,
+def ground_penetration(
+    body_q: torch.Tensor,  # [body_count, 7, 1]
+    contact_mask: torch.Tensor,  # [body_count, max_contacts]
+    contact_points: torch.Tensor,  # [body_count, max_contacts, 3, 1]
+    ground_points: torch.Tensor,  # [body_count, max_contacts, 3, 1]
+    contact_normals: torch.Tensor,  # [body_count, max_contacts, 3, 1]
 ) -> torch.Tensor:
-    # Transform contact points to world frame
-    p_a = transform_points_batch(r_a, body_q_a)  # [N, 3]
-    p_b = transform_points_batch(r_b, body_q_b)  # [N, 3]
+    body_count = body_q.shape[0]
+    max_contacts = contact_points.shape[1]
 
-    diff = p_b - p_a  # Vector from body A to body B [N, 3]
+    points_world = transform_points_batch(
+        contact_points, body_q.expand(body_count, max_contacts, 7, 1)
+    )
+    diff = ground_points - points_world
 
-    penetration = (diff * n).sum(dim=1)  # [N]
+    penetration = (diff * contact_normals).sum(dim=2)
+
+    # Zero out the penetration where the mask is false
+    penetration[~contact_mask] = 0.0
+
     return penetration
 
 
@@ -100,27 +106,29 @@ def compute_contact_jacobian(state):
 
         if num_valid > 0:
             # Extract data for valid contacts
-            local_points = state.contact_points[b, valid_contacts]  # [num_valid, 3]
-            normals = state.contact_normals[b, valid_contacts]  # [num_valid, 3]
+            local_points = state.contact_points[b, valid_contacts]  # [num_valid, 3, 1]
+            normals = state.contact_normals[b, valid_contacts]  # [num_valid, 3, 1]
 
             # Transform local points to world coordinates
-            body_transforms = state.body_q[b].expand(num_valid, -1)  # [num_valid, 7]
+            body_transforms = state.body_q[b].expand(
+                num_valid, 7, 1
+            )  # [num_valid, 7, 1]
             world_points = transform_points_batch(
                 local_points, body_transforms
-            )  # [num_valid, 3]
+            )  # [num_valid, 3, 1]
 
             # Compute r = world_points - body_position
-            body_pos = state.body_q[b, :3].unsqueeze(0)  # [1, 3]
-            r = world_points - body_pos  # [num_valid, 3]
+            body_pos = state.body_q[b, :3].view(1, 3, 1)  # [1, 3, 1]
+            r = world_points - body_pos  # [num_valid, 3, 1]
 
             # Compute r x n
-            r_cross_n = torch.cross(r, normals, dim=1)  # [num_valid, 3]
+            r_cross_n = torch.cross(r, normals, dim=1)  # [num_valid, 3, 1]
 
             # Assemble Jacobian: [-r_cross_n, -normals]
-            J = torch.cat([-r_cross_n, -normals], dim=1)  # [num_valid, 6]
+            J = torch.cat([r_cross_n, normals], dim=1)  # [num_valid, 6, 1]
 
             # Assign to the output tensor
-            J_normal[b, valid_contacts] = J
+            J_normal[b, valid_contacts] = J.squeeze(2)
 
     return J_normal
 

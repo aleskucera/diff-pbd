@@ -31,21 +31,21 @@ def quat_mul_batch(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     q = [w, x, y, z]
 
     Args:
-        q1 (torch.Tensor): First quaternions, shape [..., 4]
-        q2 (torch.Tensor): Second quaternions, shape [..., 4]
+        q1 (torch.Tensor): First quaternions, shape [:, 4, 1]
+        q2 (torch.Tensor): Second quaternions, shape [:, 4, 1]
 
     Returns:
-        torch.Tensor: Resulting quaternions, shape [..., 4]
+        torch.Tensor: Resulting quaternions, shape [:, 4, 1]
     """
-    w1, x1, y1, z1 = q1.unbind(-1)
-    w2, x2, y2, z2 = q2.unbind(-1)
+    w1, x1, y1, z1 = q1.unbind(1)
+    w2, x2, y2, z2 = q2.unbind(1)
 
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
 
-    q_out = torch.stack([w, x, y, z], dim=-1)
+    q_out = torch.stack([w, x, y, z], dim=1)
     return q_out.type(q1.dtype)
 
 
@@ -87,7 +87,7 @@ def normalize_quat_batch(q: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: Normalized quaternions, shape [..., 4]
     """
-    q_normalized = q / torch.norm(q, dim=-1, keepdim=True)
+    q_normalized = q / torch.norm(q, dim=1, keepdim=True)
     return q_normalized
 
 
@@ -145,11 +145,11 @@ def rotate_vectors_batch(vectors: torch.Tensor, quats: torch.Tensor) -> torch.Te
     Rotates vectors by quaternions in batch.
 
     Args:
-        vectors (torch.Tensor): Vectors to rotate, shape [..., 3]
-        quats (torch.Tensor): Quaternions to rotate by, shape [..., 4]
+        vectors (torch.Tensor): Vectors to rotate, shape [..., 3, 1]
+        quats (torch.Tensor): Quaternions to rotate by, shape [..., 4, 1]
 
     Returns:
-        torch.Tensor: Rotated vectors, shape [..., 3]
+        torch.Tensor: Rotated vectors, shape [..., 3, 1]
     """
     # Convert to correct dtype
     dtype = torch.promote_types(vectors.dtype, quats.dtype)
@@ -157,20 +157,20 @@ def rotate_vectors_batch(vectors: torch.Tensor, quats: torch.Tensor) -> torch.Te
     quats = quats.to(dtype)
 
     # Extract quaternion components
-    q_w = quats[..., 0]
-    q_v = quats[..., 1:]
+    q_w = quats[..., 0, :].unsqueeze(-2)
+    q_v = quats[..., 1:, :]
 
     # Compute dot products
-    q_v_dot_v = torch.sum(q_v * vectors, dim=-1, keepdim=True)
-    q_v_norm = torch.sum(q_v * q_v, dim=-1, keepdim=True)
+    q_v_dot_v = torch.sum(q_v * vectors, dim=-2, keepdim=True) # [..., 1, 1]
+    q_v_norm = torch.sum(q_v * q_v, dim=-2, keepdim=True) # [..., 1, 1]
 
     # Compute cross products
-    q_v_cross_v = torch.linalg.cross(q_v, vectors, dim=-1)
+    q_v_cross_v = torch.linalg.cross(q_v, vectors, dim=-2) # [..., 3, 1]
 
     # Compute formula
-    term1 = 2.0 * q_v_dot_v * q_v
-    term2 = (q_w.unsqueeze(-1) ** 2 - q_v_norm) * vectors
-    term3 = 2.0 * q_w.unsqueeze(-1) * q_v_cross_v
+    term1 = 2.0 * q_v_dot_v * q_v # [..., 3, 1]
+    term2 = (q_w ** 2 - q_v_norm) * vectors # [..., 3, 1]
+    term3 = 2.0 * q_w * q_v_cross_v # [..., 3, 1]
 
     result = term1 + term2 + term3
     return result.to(vectors.dtype)
@@ -229,14 +229,14 @@ def transform_points_batch(
     Apply rigid transforms to points in batch.
 
     Args:
-        points (torch.Tensor): Points to transform, shape [..., 3]
-        transforms (torch.Tensor): Transforms [x, y, z, qw, qx, qy, qz], shape [..., 7]
+        points (torch.Tensor): Points to transform, shape [..., 3, 1]
+        transforms (torch.Tensor): Transforms [x, y, z, qw, qx, qy, qz], shape [..., 7, 1]
 
     Returns:
         torch.Tensor: Transformed points, shape [..., 3]
     """
-    positions = transforms[..., :3]
-    rotations = transforms[..., 3:]
+    positions = transforms[..., :3, :]
+    rotations = transforms[..., 3:, :]
     return rotate_vectors_batch(points, rotations) + positions
 
 

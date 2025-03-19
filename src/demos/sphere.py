@@ -28,14 +28,14 @@ def main():
         name="sphere",
         pos=Vector3(torch.tensor([0.0, 0.0, 3.0])),
         rot=Quaternion(ROT_IDENTITY),
-        restitution=1.0,
+        restitution=0.3,
         dynamic_friction=1.0,
         n_collision_points=400,
     )
 
     # Add initial rotation to the box
-    model.body_qd[sphere, :3] = torch.tensor([0.0, 0.0, 0.0])
-    model.body_qd[sphere, 3:] = torch.tensor([0.0, 0.0, 0.0])
+    model.body_qd[sphere, :3] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
+    model.body_qd[sphere, 3:] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
 
     # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
@@ -44,7 +44,7 @@ def main():
 
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
-        collide(model, states[i], collision_margin=0.1)
+        # collide(model, states[i], collision_margin=0.1)
         collide_batch(model, states[i], collision_margin=0.1)
         # engine.simulate(model, states[i], states[i + 1], control, dt)
 
