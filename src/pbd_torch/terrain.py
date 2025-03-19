@@ -11,7 +11,7 @@ import torch
 class Terrain:
     """
     Represents a terrain heightmap with associated properties.
-    
+
     Attributes:
         size_x: Size of terrain in x direction (meters)
         size_y: Size of terrain in y direction (meters)
@@ -19,68 +19,69 @@ class Terrain:
         normals: Optional pre-computed normal vectors
         max_coord: Maximum coordinate value for interpolation (defaults to max of size_x/2, size_y/2)
     """
+
     size_x: float
     size_y: float
     height_data: torch.Tensor
     normals: torch.Tensor = None
     max_coord: float = None
-    
+
     # Bounds are computed during initialization
     bounds: dict = field(default_factory=dict)
-    
+
     def __post_init__(self):
         # Validate inputs
         if len(self.height_data.shape) != 2:
             raise ValueError("Height data must be a 2D tensor")
-            
+
         # Store dimensions for convenience
         self.resolution_y, self.resolution_x = self.height_data.shape
-        
+
         # Set max_coord if not provided
         if self.max_coord is None:
-            self.max_coord = max(self.size_x/2, self.size_y/2)
-            
+            self.max_coord = max(self.size_x / 2, self.size_y / 2)
+
         # Compute bounds
         self.bounds = {
             "minZ": float(self.height_data.min()),
             "maxZ": float(self.height_data.max()),
-            "minX": -self.size_x/2,
-            "maxX": self.size_x/2,
-            "minY": -self.size_y/2,
-            "maxY": self.size_y/2
+            "minX": -self.size_x / 2,
+            "maxX": self.size_x / 2,
+            "minY": -self.size_y / 2,
+            "maxY": self.size_y / 2,
         }
-        
+
         # Compute normals if not provided
         if self.normals is None:
             self.compute_normals()
-    
+
     def compute_normals(self):
         """Computes normal vectors for each point in the height field."""
         device = self.height_data.device
-        
+
         # Calculate grid spacings
-        dx = self.size_x / (self.resolution_x - 1)  
+        dx = self.size_x / (self.resolution_x - 1)
         dy = self.size_y / (self.resolution_y - 1)
-        
+
         # Compute gradients using torch.gradient
         dz_dy, dz_dx = torch.gradient(self.height_data, spacing=(dy, dx))
-        
+
         # Create normal vectors (-dz_dx, -dz_dy, 1) and normalize
         ones = torch.ones_like(self.height_data)
         normals = torch.stack([-dz_dx, -dz_dy, ones], dim=-1)
-        
+
         # Normalize each normal vector
         norm = torch.norm(normals, dim=-1, keepdim=True)
         self.normals = normals / norm
-    
+
     def get_height_at_point(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
         Gets interpolated height at given x,y coordinates.
-        
+
         Args:
             x: Tensor of x coordinates
             y: Tensor of y coordinates
-            
+
         Returns:
             Tensor of interpolated heights at requested points
         """
@@ -89,31 +90,37 @@ class Terrain:
             x = torch.tensor(x, device=self.height_data.device)
         if not isinstance(y, torch.Tensor):
             y = torch.tensor(y, device=self.height_data.device)
-            
+
         # Reshape inputs for interpolation
         batch_size = 1
         num_points = x.numel()
-        
+
         # Combine x and y into query points
-        query = torch.stack([x.flatten(), y.flatten()], dim=-1).reshape(batch_size, num_points, 2)
-        
+        query = torch.stack([x.flatten(), y.flatten()], dim=-1).reshape(
+            batch_size, num_points, 2
+        )
+
         # Add batch dimension to height data if needed
-        grid = self.height_data.unsqueeze(0) if self.height_data.dim() == 2 else self.height_data
-        
+        grid = (
+            self.height_data.unsqueeze(0)
+            if self.height_data.dim() == 2
+            else self.height_data
+        )
+
         # Use the interpolation function
         heights = interpolate_grid(grid, query, self.max_coord).squeeze()
-        
+
         # Return appropriately shaped output
         return heights.reshape_as(x) if x.numel() > 1 else heights.item()
-    
+
     def get_normal_at_point(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
         Gets interpolated normal vector at given x,y coordinates.
-        
+
         Args:
             x: Tensor of x coordinates
             y: Tensor of y coordinates
-            
+
         Returns:
             Tensor of interpolated normal vectors at requested points
         """
@@ -122,26 +129,28 @@ class Terrain:
             x = torch.tensor(x, device=self.height_data.device)
         if not isinstance(y, torch.Tensor):
             y = torch.tensor(y, device=self.height_data.device)
-            
+
         # Reshape inputs for interpolation
         batch_size = 1
         num_points = x.numel()
-        
+
         # Combine x and y into query points
-        query = torch.stack([x.flatten(), y.flatten()], dim=-1).reshape(batch_size, num_points, 2)
-        
+        query = torch.stack([x.flatten(), y.flatten()], dim=-1).reshape(
+            batch_size, num_points, 2
+        )
+
         # Add batch dimension to normals and permute to match expected format
         normals_batch = self.normals.unsqueeze(0).permute(0, 3, 1, 2)
-        
+
         # Use the interpolation function
         result_normals = interpolate_normals(normals_batch, query, self.max_coord)
-        
+
         # Return appropriately shaped output
         if x.numel() == 1:
             return result_normals.squeeze()
         else:
             return result_normals.reshape(*x.shape, 3)
-    
+
     def serialize(self):
         """
         Serializes the terrain data for transmission to the client.
@@ -149,27 +158,28 @@ class Terrain:
         """
         # Flatten tensors for JSON serialization
         height_data_flat = self.height_data.flatten().tolist()
-        
+
         # Prepare normals if available
         normals_flat = None
         if self.normals is not None:
             # Reshape to [rows*cols, 3] and flatten to [x1,y1,z1,x2,y2,z2,...]
             normals_flat = self.normals.reshape(-1, 3).flatten().tolist()
-        
+
         return {
             "dimensions": {
                 "size_x": float(self.size_x),
                 "size_y": float(self.size_y),
                 "resolution_x": int(self.resolution_x),
-                "resolution_y": int(self.resolution_y)
+                "resolution_y": int(self.resolution_y),
             },
             "bounds": self.bounds,
             "max_coord": float(self.max_coord),
             "heightData": height_data_flat,
-            "normals": normals_flat
+            "normals": normals_flat,
         }
 
-def load_exr_file(file_path: str, channel: str = 'R') -> torch.Tensor:
+
+def load_exr_file(file_path: str, channel: str = "R") -> torch.Tensor:
     """
     Loads a specific channel from an .exr file.
 
@@ -183,7 +193,7 @@ def load_exr_file(file_path: str, channel: str = 'R') -> torch.Tensor:
     # Open the .exr file
     exr_file = OpenEXR.InputFile(file_path)
     # Get the pixel data
-    dw = exr_file.header()['dataWindow']
+    dw = exr_file.header()["dataWindow"]
     size = (dw.max.x - dw.min.x + 1, dw.max.y - dw.min.y + 1)
     # Read the specified channel
     channel_data = exr_file.channel(channel, Imath.PixelType(Imath.PixelType.FLOAT))
@@ -193,29 +203,36 @@ def load_exr_file(file_path: str, channel: str = 'R') -> torch.Tensor:
     data = np.copy(data)
     return torch.from_numpy(data)
 
-def create_terrain_from_exr_file(heightmap_path: str, size_x: float, size_y: float) -> Terrain:
+
+def create_terrain_from_exr_file(
+    heightmap_path: str,
+    size_x: float,
+    size_y: float,
+    device: torch.device = torch.device("cpu"),
+) -> Terrain:
     """
     Loads a heightmap file and creates a Terrain object.
-    
+
     Args:
         heightmap_path: Path to the .exr file
         size_x: Size of the ground in the x-direction (meters)
         size_y: Size of the ground in the y-direction (meters)
-        
+
     Returns:
         A Terrain object representing the heightmap
     """
-    heightmap = load_exr_file(heightmap_path, 'R')
-    
+    heightmap = load_exr_file(heightmap_path, "R").to(device)
+
     # Create the Terrain object
     terrain = Terrain(
         size_x=float(size_x),
         size_y=float(size_y),
         height_data=heightmap,
-        max_coord=max(size_x/2, size_y/2)  # Set max_coord explicitly
+        max_coord=max(size_x / 2, size_y / 2),  # Set max_coord explicitly
     )
-    
+
     return terrain
+
 
 def normalized(x, eps=1e-6):
     """
@@ -232,7 +249,10 @@ def normalized(x, eps=1e-6):
     norm.clamp_(min=eps)
     return x / norm
 
-def interpolate_normals(normals: torch.Tensor, query: torch.Tensor, max_coord: float) -> torch.Tensor:
+
+def interpolate_normals(
+    normals: torch.Tensor, query: torch.Tensor, max_coord: float
+) -> torch.Tensor:
     """
     Interpolates the normals at the desired (query[0], query[1]]) coordinates.
 
@@ -248,11 +268,15 @@ def interpolate_normals(normals: torch.Tensor, query: torch.Tensor, max_coord: f
     # Query coordinates of shape (B, N, 1, 2)
     grid_coords = norm_query.unsqueeze(2)
     # Interpolate the normals into shape (B, 3, N)
-    interpolated_normals = torch.nn.functional.grid_sample(normals, grid_coords, align_corners=True, mode="bilinear").squeeze(3)
+    interpolated_normals = torch.nn.functional.grid_sample(
+        normals, grid_coords, align_corners=True, mode="bilinear"
+    ).squeeze(3)
     return normalized(interpolated_normals.transpose(1, 2))
 
 
-def interpolate_grid(grid: torch.Tensor, query: torch.Tensor, max_coord: float | torch.Tensor) -> torch.Tensor:
+def interpolate_grid(
+    grid: torch.Tensor, query: torch.Tensor, max_coord: float | torch.Tensor
+) -> torch.Tensor:
     """
     Interpolates the height at the desired (query[0], query[1]]) coordinates.
 
@@ -270,5 +294,7 @@ def interpolate_grid(grid: torch.Tensor, query: torch.Tensor, max_coord: float |
     # Grid of shape (B, 1, H, W)
     grid_w_c = grid.unsqueeze(1)
     # Interpolate the grid values into shape (B, 1, N, 1)
-    z_query = torch.nn.functional.grid_sample(grid_w_c, grid_coords, align_corners=True, mode="bilinear")
+    z_query = torch.nn.functional.grid_sample(
+        grid_w_c, grid_coords, align_corners=True, mode="bilinear"
+    )
     return z_query.squeeze(1)

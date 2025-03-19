@@ -7,40 +7,41 @@ import torch
 from demos.utils import save_simulation
 from pbd_torch.collision import collide
 from pbd_torch.constants import ROT_IDENTITY
-from pbd_torch.integrator import XPBDIntegrator
 from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
 from pbd_torch.model import State
 from pbd_torch.model import Vector3
+from pbd_torch.xpbd_engine import XPBDEngine
 from tqdm import tqdm
 
-matplotlib.use('TkAgg')
+matplotlib.use("TkAgg")
+
+# Detect anomalies in torch autograd
+torch.autograd.set_detect_anomaly(True)
 
 
 def trajectory_loss(states: List[State], target_states: List[State]):
-    loss = torch.tensor([0.0],
-                        device=states[0].body_q.device,
-                        requires_grad=True)
+    loss = torch.tensor([0.0], device=states[0].body_q.device, requires_grad=True)
     for state, target_state in zip(states, target_states):
-        loss = loss + torch.sum(
-            (state.body_q[0][:3] - target_state.body_q[0][:3])**2)
+        loss = loss + torch.sum((state.body_q[0][:3] - target_state.body_q[0][:3]) ** 2)
     loss = loss / len(states)
     return loss
 
 
 def plot_trajectory(states: List[State], target_states: List[State] = None):
     fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
+    ax = fig.add_subplot(111, projection="3d")
 
-    trajectory = torch.stack(
-        [state.body_q[0][:3].cpu().detach() for state in states])
+    trajectory = torch.stack([state.body_q[0][:3].cpu().detach() for state in states])
     ax.plot(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2])
 
     if target_states is not None:
         target_trajectory = torch.stack(
-            [state.body_q[0][:3].cpu().detach() for state in target_states])
-        ax.plot(target_trajectory[:, 0], target_trajectory[:, 1],
-                target_trajectory[:, 2])
+            [state.body_q[0][:3].cpu().detach() for state in target_states]
+        )
+        ax.plot(
+            target_trajectory[:, 0], target_trajectory[:, 1], target_trajectory[:, 2]
+        )
 
     # Make all axes equal
     max_range = torch.max(trajectory.max(0)[0] - trajectory.min(0)[0])
@@ -61,20 +62,26 @@ class BallThrow:
         self.n_steps = n_steps
         self.output_file = output_file
 
-        self.model = Model(device=torch.device('cuda') if
-                           torch.cuda.is_available() else torch.device('cpu'),
-                           requires_grad=True)
-        self.integrator = XPBDIntegrator(iterations=2)
+        self.model = Model(
+            device=(
+                torch.device("cuda")
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            ),
+            requires_grad=True,
+        )
+        self.integrator = XPBDEngine(iterations=2)
 
-        self.sphere = self.model.add_sphere(m=10.0,
-                                            radius=1.0,
-                                            name='sphere',
-                                            pos=Vector3(
-                                                torch.tensor([0.0, 0.0, 3.5])),
-                                            rot=Quaternion(ROT_IDENTITY),
-                                            restitution=1.0,
-                                            dynamic_friction=1.0,
-                                            n_collision_points=400)
+        self.sphere = self.model.add_sphere(
+            m=10.0,
+            radius=1.0,
+            name="sphere",
+            pos=Vector3(torch.tensor([0.0, 0.0, 3.5])),
+            rot=Quaternion(ROT_IDENTITY),
+            restitution=1.0,
+            dynamic_friction=1.0,
+            n_collision_points=400,
+        )
 
         # Set up the initial state
         self.states = [self.model.state() for _ in range(n_steps)]
@@ -87,20 +94,27 @@ class BallThrow:
         self.states = [self.model.state() for _ in range(self.n_steps)]
 
     def forward(self, states: List[State]):
-        for i in tqdm(range(len(states) - 1), desc='Simulating'):
+        for i in tqdm(range(len(states) - 1), desc="Simulating"):
             collide(self.model, states[i], collision_margin=0.1)
-            self.integrator.simulate(self.model, states[i], states[i + 1],
-                                     self.control, self.dt)
+            self.integrator.simulate(
+                self.model, states[i], states[i + 1], self.control, self.dt
+            )
 
     def generate_target_states(self):
         self.target_states[0].body_qd[0][3:] = torch.tensor(
-            [2.5, 0.0, 0.0], device=self.model.device)
-        for i in tqdm(range(len(self.target_states) - 1),
-                      desc='Generating target states'):
+            [2.5, 0.0, 0.0], device=self.model.device
+        )
+        for i in tqdm(
+            range(len(self.target_states) - 1), desc="Generating target states"
+        ):
             collide(self.model, self.target_states[i], collision_margin=0.1)
-            self.integrator.simulate(self.model, self.target_states[i],
-                                     self.target_states[i + 1], self.control,
-                                     self.dt)
+            self.integrator.simulate(
+                self.model,
+                self.target_states[i],
+                self.target_states[i + 1],
+                self.control,
+                self.dt,
+            )
 
         save_simulation(self.model, self.target_states, self.output_file)
 
@@ -119,8 +133,7 @@ class BallThrow:
             loss.backward(retain_graph=True)
 
             # Update the velocity
-            grads.append(
-                self.states[0].body_qd.grad[0][3].cpu().detach().item())
+            grads.append(self.states[0].body_qd.grad[0][3].cpu().detach().item())
             losses.append(loss.cpu().detach().item())
             print(grads)
 
@@ -128,33 +141,32 @@ class BallThrow:
         x = vx_samples.cpu().detach().numpy()
         grads = np.array(grads)
         losses = np.array(losses)
-        np.savez('sphere_throw_data_2.npz', x=x, grads=grads, losses=losses)
+        np.savez("sphere_throw_data_2.npz", x=x, grads=grads, losses=losses)
 
 
 def plot_data(file: str):
     data = np.load(file)
-    x = data['x']
-    grads = data['grads']
-    losses = data['losses']
+    x = data["x"]
+    grads = data["grads"]
+    losses = data["losses"]
 
     # Two subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle('Velocity vs Loss and Gradient')
+    fig.suptitle("Velocity vs Loss and Gradient")
 
     ax1.plot(x, losses, label="Loss")
-    ax1.set_ylabel('Loss')
-    ax1.set_xlabel('Velocity')
+    ax1.set_ylabel("Loss")
+    ax1.set_xlabel("Velocity")
     ax1.legend()
 
     ax2.plot(x, grads, label="Gradient", color="orange")
-    ax2.set_ylabel('Gradient')
-    ax2.set_xlabel('Velocity')
+    ax2.set_ylabel("Gradient")
+    ax2.set_xlabel("Velocity")
     ax2.legend()
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     plt.show()
-
 
     # def plot_loss(self):
     #     forces = np.linspace(0, 200, 50)
@@ -189,10 +201,11 @@ def plot_data(file: str):
     #     plt.tight_layout(rect=[0, 0, 1, 0.95])
     #     plt.show()
 
-if __name__ == '__main__':
-    # model = BallThrow(0.025, 150, 'simulation/sphere_throw_gradient.json')
-    # model.generate_target_states()
-    # # plot_trajectory(model.target_states)
-    # model.run()
 
-    plot_data('sphere_throw_data_2.npz')
+if __name__ == "__main__":
+    model = BallThrow(0.025, 150, "simulation/sphere_throw_gradient.json")
+    model.generate_target_states()
+    plot_trajectory(model.target_states)
+    model.run()
+
+    # plot_data("sphere_throw_data_2.npz")
