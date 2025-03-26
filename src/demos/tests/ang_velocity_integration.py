@@ -33,7 +33,9 @@ def compute_H(q: torch.Tensor) -> torch.Tensor:
     return H
 
 
-def integrate_angle(q: torch.Tensor, w: torch.Tensor, dt: torch.Tensor) -> torch.Tensor:
+def integrate_angle_exact(
+    q: torch.Tensor, w: torch.Tensor, dt: torch.Tensor
+) -> torch.Tensor:
     theta = torch.norm(w, dim=-1, keepdim=True) * dt  # Rotation angle
     axis = w / (torch.norm(w, dim=-1, keepdim=True) + 1e-10)  # Rotation axis
     wx, wy, wz = axis.unbind(dim=-1)
@@ -87,7 +89,7 @@ def test_integration_methods(q, w, dt, num_iterations=1000):
 
     start_time = time.time()
     for _ in range(num_iterations):
-        q_exact = integrate_angle(q, w, dt)
+        q_exact = integrate_angle_exact(q, w, dt)
     results["Exact Integration Time"] = time.time() - start_time
 
     start_time = time.time()

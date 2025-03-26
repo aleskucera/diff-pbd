@@ -821,17 +821,17 @@ def transform_multiply_batch(
     Multiply transforms in batch (compose transformations).
 
     Args:
-        transform_a (torch.Tensor): First transforms [x, y, z, qw, qx, qy, qz], shape [..., 7]
-        transform_b (torch.Tensor): Second transforms [x, y, z, qw, qx, qy, qz], shape [..., 7]
+        transform_a (torch.Tensor): First transforms [x, y, z, qw, qx, qy, qz], shape [N, 7, 1]
+        transform_b (torch.Tensor): Second transforms [x, y, z, qw, qx, qy, qz], shape [N, 7, 1]
 
     Returns:
-        torch.Tensor: Composed transforms, shape [..., 7]
+        torch.Tensor: Composed transforms, shape [N, 7, 1]
     """
     # Extract positions and orientations
-    x_a = transform_a[..., :3]  # position of frame A
-    q_a = transform_a[..., 3:]  # orientation of frame A
-    x_b = transform_b[..., :3]  # position of frame B
-    q_b = transform_b[..., 3:]  # orientation of frame B
+    x_a = transform_a[:, :3]  # position of frame A
+    q_a = transform_a[:, 3:]  # orientation of frame A
+    x_b = transform_b[:, :3]  # position of frame B
+    q_b = transform_b[:, 3:]  # orientation of frame B
 
     # Combine the rotations
     q = quat_mul_batch(q_a, q_b)
@@ -839,4 +839,4 @@ def transform_multiply_batch(
     # Transform the position
     x = x_a + rotate_vectors_batch(x_b, q_a)
 
-    return torch.cat([x, q], dim=-1)
+    return torch.cat([x, q], dim=1)

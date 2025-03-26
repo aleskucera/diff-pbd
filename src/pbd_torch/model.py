@@ -18,9 +18,10 @@ Transform = NewType("Transform", torch.Tensor)  # (7, ) tensor
 Matrix3x3 = NewType("Matrix3x3", torch.Tensor)  # (3, 3) tensor
 Quaternion = NewType("Quaternion", torch.Tensor)  # (4, ) tensor
 
-BOX = 0
-SPHERE = 1
-CYLINDER = 2
+CUSTOM_SHAPE = 0
+BOX_SHAPE = 1
+SPHERE_SHAPE = 2
+CYLINDER_SHAPE = 3
 
 JOINT_MODE_FORCE = 0
 JOINT_MODE_TARGET_POSITION = 1
@@ -34,27 +35,29 @@ class Shape:
     def serialize(self):
         return asdict(self)
 
+@dataclass
+class Custom(Shape):
+    type: int = field(init=False, default=CYLINDER_SHAPE)
 
 @dataclass
 class Box(Shape):
     hx: float
     hy: float
     hz: float
-    type: int = field(init=False, default=BOX)
+    type: int = field(init=False, default=BOX_SHAPE)
 
 
 @dataclass
 class Sphere(Shape):
     radius: float
-    type: int = field(init=False, default=SPHERE)
+    type: int = field(init=False, default=SPHERE_SHAPE)
 
 
 @dataclass
 class Cylinder(Shape):
     radius: float
     height: float
-    type: int = field(init=False, default=CYLINDER)
-
+    type: int = field(init=False, default=CYLINDER_SHAPE)
 
 class State:
 
@@ -110,10 +113,11 @@ class State:
             "bodies": [
                 {
                     "name": model.body_name[i],
-                    "q": tensor_to_list(self.body_q[i].squeeze(1)),
-                    "qd": tensor_to_list(self.body_qd[i].squeeze(1)),
-                    "contacts": tensor_to_list(contacts[i]),
-                    "f": tensor_to_list(self.body_f[i].squeeze(1)),
+                    "transform": [tensor_to_list(self.body_q[i].squeeze(1)), tensor_to_list(self.body_q[i].squeeze(1))], # [B, 7]
+                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1)), tensor_to_list(self.body_qd[i].squeeze(1))], # [B, 6]
+                    "force": [tensor_to_list(self.body_f[i].squeeze(1)), tensor_to_list(self.body_f[i].squeeze(1))], # [B, 6]
+                    "contacts": [tensor_to_list(contacts[i]), tensor_to_list(contacts[i])], # [B, num_contacts] (indices)
+                    "energy": [0.1, 0.1],
                 }
                 for i in range(self.body_count)
             ],
@@ -161,10 +165,10 @@ class Model:
         )  # [body_count, 6, 1]
 
         self.body_mass = torch.zeros(
-            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )  # [body_count, 1]
         self.body_inv_mass = torch.zeros(
-            (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
+            (0, 1, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )  # [body_count, 1]
         self.body_inertia = torch.zeros(
             (0, 3, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
@@ -197,7 +201,7 @@ class Model:
         self.joint_act = torch.zeros(
             (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
-        self.joint_axis_mode = torch.zeros((0, 1), dtype=torch.int32, device=device)
+        self.joint_axis_mode = torch.zeros((0,), dtype=torch.int32, device=device)
         self.joint_ke = torch.zeros(
             (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
@@ -245,8 +249,8 @@ class Model:
 
         mass_matrix = torch.zeros((self.body_count, 6, 6), device=self.device)
 
-        mass_matrix[:, :3, :3] = mass_blocks
-        mass_matrix[:, 3:, 3:] = self.body_inertia
+        mass_matrix[:, :3, :3] = self.body_inertia
+        mass_matrix[:, 3:, 3:] = mass_blocks
 
         return mass_matrix
 
@@ -254,11 +258,11 @@ class Model:
         assert m > 0, "Body mass must be positive"
         assert isinstance(m, float), "Body mass must be a float"
 
-        body_mass = torch.tensor([m], device=self.device).view(1, 1)
+        body_mass = torch.tensor([m], device=self.device).view(1, 1, 1)
         self.body_mass = torch.cat([self.body_mass, body_mass]).requires_grad_(
             self.requires_grad
         )
-        body_inv_mass = torch.tensor([1 / m], device=self.device).view(1, 1)
+        body_inv_mass = torch.tensor([1 / m], device=self.device).view(1, 1, 1)
         self.body_inv_mass = torch.cat(
             [self.body_inv_mass, body_inv_mass]
         ).requires_grad_(self.requires_grad)
@@ -428,7 +432,7 @@ class Model:
         self.body_shapes.append(Cylinder(radius=radius, height=height))
         self.body_name.append(name or f"body_{self.body_count}")
 
-        body_q = torch.cat([pos, rot]).to(self.device).view(1, 7)
+        body_q = torch.cat([pos, rot]).to(self.device).view(1, 7, 1)
         self.body_q = torch.cat([self.body_q, body_q])
         doby_qd = torch.zeros((1, 6, 1), device=self.device)
         self.body_qd = torch.cat([self.body_qd, doby_qd])
@@ -488,7 +492,7 @@ class Model:
         self.joint_q = torch.cat([self.joint_q, joint_q])
         joint_qd = torch.tensor([qd], device=self.device).view(1, 1)
         self.joint_qd = torch.cat([self.joint_qd, joint_qd])
-        joint_act = torch.tensor([act], device=self.device)
+        joint_act = torch.tensor([act], device=self.device).view(1, 1)
         self.joint_act = torch.cat([self.joint_act, joint_act])
 
         # Add parent and child indices
@@ -500,13 +504,12 @@ class Model:
         )
 
         # Add joint axis
-        joint_axis = (axis / torch.norm(axis)).to(self.device)
-        self.joint_axis = torch.cat([self.joint_axis, joint_axis.unsqueeze(0)])
+        joint_axis = (axis / torch.norm(axis)).to(self.device).view(1, 3, 1)
+        self.joint_axis = torch.cat([self.joint_axis, joint_axis])
 
         # Add joint compliance
-        self.joint_compliance = torch.cat(
-            [self.joint_compliance, torch.tensor([compliance], device=self.device)]
-        )
+        joint_compliance = torch.tensor([compliance], device=self.device).view(1, 1)
+        self.joint_compliance = torch.cat([self.joint_compliance, joint_compliance])
 
         parent_xform = parent_xform.to(self.device).view(1, 7, 1)
         child_xform = child_xform.to(self.device).view(1, 7, 1)
@@ -520,8 +523,8 @@ class Model:
         )
 
         # Set default stiffness and damping
-        self.joint_ke = torch.cat([self.joint_ke, torch.zeros(1, device=self.device)])
-        self.joint_kd = torch.cat([self.joint_kd, torch.zeros(1, device=self.device)])
+        self.joint_ke = torch.cat([self.joint_ke, torch.zeros((1, 1), device=self.device)])
+        self.joint_kd = torch.cat([self.joint_kd, torch.zeros((1, 1), device=self.device)])
 
         return self.joint_count - 1
 
@@ -550,18 +553,16 @@ class Model:
             return tensor.cpu().tolist() if tensor.numel() > 0 else []
 
         data = {
-            "body_count": self.body_count,
-            "joint_count": self.joint_count,
+            "simBatches": 2,
+            "scalarNames": ["energy"],
             "bodies": [
                 {
                     "name": self.body_name[i],
                     "shape": self.body_shapes[i].serialize(),
-                    "q": tensor_to_list(self.body_q[i].squeeze(1)),
-                    "qd": tensor_to_list(self.body_qd[i].squeeze(1)),
-                    "f": tensor_to_list(self.body_f[i].squeeze(1)),
-                    "collision_points": tensor_to_list(
-                        self.body_collision_points.get(i, torch.empty(0))
-                    ),
+                    "transform": [tensor_to_list(self.body_q[i].squeeze(1)), tensor_to_list(self.body_q[i].squeeze(1))], # [batch_size, 7]
+                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1)), tensor_to_list(self.body_qd[i].squeeze(1))], # [batch_size, 6]
+                    "force": [tensor_to_list(self.body_f[i].squeeze(1)), tensor_to_list(self.body_f[i].squeeze(1))], # [batch_size, 3]
+                    "bodyPoints": tensor_to_list(self.body_collision_points.get(i, torch.empty(0))), # [num_points, 3]
                 }
                 for i in range(self.body_count)
             ],

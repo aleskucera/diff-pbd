@@ -92,15 +92,17 @@ def collide_ground_batch(model: Model, state: State, collision_margin: float = 0
     device = model.device
 
     # Transform collision points to world coordinates
-    body_transforms = state.body_q[model.coll_points_body_idx]
-    points_world = transform_points_batch(model.coll_points, body_transforms)
-    contact_mask = (points_world[:, 2] < collision_margin).view(-1)
+    body_transforms = state.body_q[model.coll_points_body_idx]  # [n_points, 7, 4]
+    points_world = transform_points_batch(
+        model.coll_points, body_transforms
+    )  # [n_points, 3, 1]
+    contact_mask = (points_world[:, 2] < collision_margin).view(-1)  # [n_coll_points]
 
     # Filter the contact data
-    contact_points = model.coll_points[contact_mask]
-    contact_body_indices = model.coll_points_body_idx[contact_mask]
+    contact_points = model.coll_points[contact_mask]  # [n_points, 3, 1]
+    contact_body_indices = model.coll_points_body_idx[contact_mask]  # [n_points]
 
-    ground_height = torch.zeros_like(contact_points[:, 0], device=device)
+    ground_height = torch.zeros_like(contact_points[:, 0], device=device)  # [n_points]
 
     # Compute the contact normals
     contact_normals = (
@@ -108,6 +110,84 @@ def collide_ground_batch(model: Model, state: State, collision_margin: float = 0
         .repeat(contact_points.shape[0], 1)
         .unsqueeze(-1)
     )  # [n_points, 3, 1]
+
+    # Compute number of contacts per body
+    max_contacts = model.max_contacts_per_body
+
+    mask_shape = (state.body_count, max_contacts)
+    vectors_shape = (state.body_count, max_contacts, 3, 1)
+
+    # Initialize batched tensors in state
+    state.contact_mask = torch.zeros(mask_shape, dtype=torch.bool, device=device)
+    state.contact_points = torch.zeros(
+        vectors_shape, dtype=torch.float32, device=device
+    )
+    state.contact_normals = torch.zeros(
+        vectors_shape, dtype=torch.float32, device=device
+    )
+    state.contact_point_indices = torch.zeros(
+        mask_shape, dtype=torch.int32, device=device
+    )
+    state.contact_points_ground = torch.zeros(
+        vectors_shape, dtype=torch.float32, device=device
+    )
+
+    # Fill batched tensors
+    for b in range(state.body_count):
+        body_contacts = contact_body_indices == b
+        num_contacts = min(
+            body_contacts.sum().item(), max_contacts
+        )  # Truncate if exceeds max
+        if num_contacts > 0:
+            body_contact_points = contact_points[body_contacts]  # [num_contacts, 3, 1]
+            body_contact_normals = contact_normals[
+                body_contacts
+            ]  # [num_contacts, 3, 1]
+            contact_point_indices = contact_mask.nonzero(as_tuple=True)[0][
+                body_contacts
+            ]  # [num_contacts]
+            ground_points = torch.stack(
+                [
+                    points_world[contact_mask][body_contacts, 0],
+                    points_world[contact_mask][body_contacts, 1],
+                    ground_height[body_contacts],
+                ],
+                dim=1,
+            )  # [num_contacts, 3, 1]
+
+            state.contact_mask[b, :num_contacts] = True
+            state.contact_points[b, :num_contacts] = body_contact_points[:num_contacts]
+            state.contact_normals[b, :num_contacts] = body_contact_normals[
+                :num_contacts
+            ]
+            state.contact_points_ground[b, :num_contacts] = ground_points[:num_contacts]
+            state.contact_point_indices[b, :num_contacts] = contact_point_indices[
+                :num_contacts
+            ]
+
+
+def collide_terrain_batch(model: Model, state: State, collision_margin: float = 0.0):
+    device = model.device
+
+    # Transform collision points to world coordinates
+    body_transforms = state.body_q[model.coll_points_body_idx]
+    points_world = transform_points_batch(model.coll_points, body_transforms)
+
+    # Get terrain height and normal
+    ground_height = model.terrain.get_height_at_point(
+        points_world[:, 0], points_world[:, 1]
+    )
+    ground_normal = model.terrain.get_normal_at_point(
+        points_world[:, 0], points_world[:, 1]
+    ).transpose(1, 2)
+
+    # Create contact mask
+    contact_mask = ((points_world[:, 2] - ground_height) < collision_margin).view(-1)
+
+    # Filter the contact data
+    contact_points = model.coll_points[contact_mask]
+    contact_body_indices = model.coll_points_body_idx[contact_mask]
+    contact_normals = ground_normal[contact_mask]  # [n_points, 3, 1]
 
     # Compute number of contacts per body
     max_contacts = model.max_contacts_per_body
@@ -146,10 +226,10 @@ def collide_ground_batch(model: Model, state: State, collision_margin: float = 0
                 [
                     points_world[contact_mask][body_contacts, 0],
                     points_world[contact_mask][body_contacts, 1],
-                    ground_height[body_contacts],
+                    ground_height[contact_mask][body_contacts],
                 ],
                 dim=1,
-            )
+            )  # [num_contacts, 3, 1]
 
             state.contact_mask[b, :num_contacts] = True
             state.contact_points[b, :num_contacts] = body_contact_points[:num_contacts]
@@ -160,78 +240,3 @@ def collide_ground_batch(model: Model, state: State, collision_margin: float = 0
             state.contact_point_indices[b, :num_contacts] = contact_point_indices[
                 :num_contacts
             ]
-
-
-def collide_terrain_batch(model: Model, state: State, collision_margin: float = 0.0):
-    # Transform collision points to world coordinates
-    points_world = transform_points_batch(
-        model.coll_points, state.body_q[model.coll_points_body_idx]
-    )
-
-    # Get terrain height and normal
-    ground_height = model.terrain.get_height_at_point(
-        points_world[:, 0], points_world[:, 1]
-    )
-    ground_normal = model.terrain.get_normal_at_point(
-        points_world[:, 0], points_world[:, 1]
-    )
-
-    # Create contact mask
-    contact_mask = (points_world[:, 2] - ground_height) < collision_margin
-
-    # Extract contact data
-    contact_points = model.coll_points[contact_mask]
-    contact_body_indices = model.coll_points_body_idx[contact_mask]
-    contact_points_indices = contact_mask.nonzero(as_tuple=True)[0]
-    contact_normals = -ground_normal[contact_mask]
-
-    # Compute number of contacts per body
-    num_contacts_per_body = torch.bincount(
-        contact_body_indices, minlength=state.body_count
-    )
-    max_contacts_needed = num_contacts_per_body.max().item()
-    max_contacts = min(max_contacts_needed, model.max_contacts_per_body)
-
-    # Initialize batched tensors in state
-    device = model.device
-    state.contact_points = torch.zeros(
-        (state.body_count, max_contacts, 3), device=device
-    )
-    state.contact_normals = torch.zeros(
-        (state.body_count, max_contacts, 3), device=device
-    )
-    state.contact_point_indices = torch.zeros(
-        (state.body_count, max_contacts), dtype=torch.int32, device=device
-    )
-    state.contact_point_ground = torch.zeros(
-        (state.body_count, max_contacts, 3), device=device
-    )
-    state.contact_mask = torch.zeros(
-        (state.body_count, max_contacts), dtype=torch.bool, device=device
-    )
-
-    # Fill batched tensors
-    for b in range(state.body_count):
-        body_contacts = contact_body_indices == b
-        num_contacts_b = min(
-            body_contacts.sum().item(), max_contacts
-        )  # Truncate if exceeds max
-        if num_contacts_b > 0:
-            state.contact_points[b, :num_contacts_b] = contact_points[body_contacts][
-                :num_contacts_b
-            ]
-            state.contact_normals[b, :num_contacts_b] = contact_normals[body_contacts][
-                :num_contacts_b
-            ]
-            state.contact_point_indices[b, :num_contacts_b] = contact_points_indices[
-                body_contacts
-            ][:num_contacts_b]
-            state.contact_point_ground[b, :num_contacts_b] = torch.stack(
-                [
-                    points_world[contact_mask][body_contacts, 0][:num_contacts_b],
-                    points_world[contact_mask][body_contacts, 1][:num_contacts_b],
-                    ground_height[contact_mask][body_contacts][:num_contacts_b],
-                ],
-                dim=1,
-            )
-            state.contact_mask[b, :num_contacts_b] = True
