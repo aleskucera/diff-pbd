@@ -6,6 +6,7 @@ import { BodyStateWindow } from "./ui/BodyStateWindow.js";
 import { AnimationController } from "./components/AnimationController.js";
 import { InteractionController } from "./components/InteractionController.js";
 import { APP_CONFIG } from "./config.js";
+import { BatchManager } from "./components/BatchManager.js";
 
 let app = {
   scene: null,
@@ -15,9 +16,10 @@ let app = {
   uiControls: null,
   bodyStateWindow: null,
   animationController: null,
-  interactionController: null,
 
-  selectedObjects: new Set(),
+  // Batch properties
+  batchCount: 1,
+  batchManager: null,
 
   // Ground
   ground: null,
@@ -25,7 +27,6 @@ let app = {
 
   // Body objects
   bodies: new Map(),
-  selectedBodies: new Set(),
 
   // Controls
   axesVisible: APP_CONFIG.axesVisible,
@@ -55,6 +56,7 @@ function init() {
   setupWindowHandlers(app);
 
   app.uiControls = new UIControls(app);
+  app.batchManager = new BatchManager(app);
   app.bodyStateWindow = new BodyStateWindow(app);
   app.animationController = new AnimationController(app);
 

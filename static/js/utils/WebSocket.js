@@ -2,6 +2,7 @@ import { Body } from "../objects/Body.js";
 import { FlatGround } from "../objects/FlatGround.js";
 import { Terrain } from "../objects/Terrain.js";
 import { createPlaybackControls } from "../ui/PlaybackControls.js";
+import { BatchManager } from "../components/BatchManager.js";
 
 export function setupWebSocket(app) {
   const socket = io();
@@ -12,8 +13,8 @@ export function setupWebSocket(app) {
     socket.emit("get_states");
   });
 
-  socket.on("model", (model) => handleModel(model, app));
-  socket.on("states", (states) => handleStates(states, app));
+  socket.on("model", (model) => handleModel(app, model));
+  socket.on("states", (states) => handleStates(app, states));
   socket.on("disconnect", () => handleDisconnect());
 
   // Error handling
@@ -22,42 +23,46 @@ export function setupWebSocket(app) {
   return socket;
 }
 
-function handleModel(model, app) {
+function handleModel(app, modelData) {
   try {
-    console.debug("Received model:", model);
+    console.debug("Received model:", modelData);
   } catch (error) {
     console.error("Failed to parse model:", error);
     return;
   }
+
+  // Initialize batch manager
+  app.batchManager = new BatchManager(app);
+  app.batchManager.initialize(modelData);
 
   // Clear existing objects
   for (const body of app.bodies.values()) {
     app.scene.remove(body);
   }
 
-  app.bodies = new Map();
-
-  if (model.robot) {
-    const body = new Body(model.robot, app.bodyVisualizationMode);
-    app.bodies.set(model.robot.name, body);
-    app.scene.add(body.getObject3D());
+  if (app.terrain) {
+    app.scene.remove(app.terrain.getObject3D());
   }
 
-  model.bodies.forEach((bodyData) => {
-    const body = new Body(bodyData, app.bodyVisualizationMode);
-    if (body) {
-      app.bodies.set(bodyData.name, body);
-      app.scene.add(body.getObject3D());
-    }
-  });
+  if (app.ground) {
+    app.scene.remove(app.ground.getObject3D());
+  }
 
-  // Handle ground visualization with clean approach
-  if (model.terrain) {
-    console.log("Using terrain data");
-    app.terrain = new Terrain(model.terrain);
+  // Process bodies
+  app.bodies = new Map();
+  if (Array.isArray(modelData.bodies)) {
+    modelData.bodies.forEach((bodyData) => {
+      createBody(app, bodyData);
+    });
+  }
+
+  // Load terrain or ground
+  if (modelData.terrain) {
+    console.debug("Using terrain data");
+    app.terrain = new Terrain(modelData.terrain, app);
     app.scene.add(app.terrain.getObject3D());
   } else {
-    console.warn("No terrain data provided, defaulting to flat ground");
+    console.debug("No terrain data provided, defaulting to flat ground");
     app.ground = new FlatGround();
     app.scene.add(app.ground.getObject3D());
   }
@@ -65,15 +70,18 @@ function handleModel(model, app) {
   app.bodyStateWindow.update();
 }
 
-function handleStates(states, app) {
-  console.debug("Received states:", states);
-  try {
-    console.debug("Received states:", states);
-  } catch (error) {
-    console.error("Failed to parse states:", error);
-    return;
-  }
-  app.animationController.loadAnimation(states);
+function createBody(app, bodyData) {
+  // Create body with the batch count
+  const batchCount = app.batchManager ? app.batchManager.getBatchCount() : 1;
+  const body = new Body(bodyData, app);
+
+  app.bodies.set(bodyData.name, body);
+  app.scene.add(body.getObject3D());
+}
+
+function handleStates(app, statesData) {
+  console.debug("Received states:", statesData);
+  app.animationController.loadAnimation(statesData);
   createPlaybackControls(app.animationController);
 }
 
@@ -83,11 +91,4 @@ function handleDisconnect() {
 
 function handleError(error) {
   console.error("WebSocket Error:", error);
-}
-
-// Helper function to clean up WebSocket connection
-export function cleanupWebSocket(socket) {
-  if (socket) {
-    socket.disconnect();
-  }
 }

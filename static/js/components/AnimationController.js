@@ -9,14 +9,32 @@ export class AnimationController {
     this.startTime = null;
     this.frameCount = 0;
     this.recordingFormat = "webm"; // Default recording format
+    this.currentStateIndex = 0;
 
     // Add progress display
     this.progressElement = this.createProgressElement();
   }
+
   loadAnimation(states) {
     this.states = states;
     this.currentStateIndex = 0;
     this.animationStartTime = performance.now(); // Use performance.now() for more precise timing
+  }
+
+  // Check if we already have a frame at this time
+  hasFrame(time) {
+    return this.states.some((state) => Math.abs(state.time - time) < 0.0001);
+  }
+
+  // Add a new frame to the animation timeline
+  addFrame(stateData) {
+    this.states.push({
+      time: stateData.time,
+      bodies: stateData.bodies || [],
+    });
+
+    // Keep states sorted by time
+    this.states.sort((a, b) => a.time - b.time);
   }
 
   play() {
@@ -68,10 +86,6 @@ export class AnimationController {
     `;
     document.body.appendChild(progress);
     return progress;
-  }
-
-  setRecordingFormat(format) {
-    this.recordingFormat = format;
   }
 
   startRecording() {
@@ -171,25 +185,24 @@ export class AnimationController {
     }
     requestAnimationFrame(() => this.animate());
   }
+
   updateScene() {
     if (!this.app.bodies || !this.states[this.currentStateIndex]) return;
 
     const state = this.states[this.currentStateIndex];
 
-    if (state.robot) {
-      const robot = this.app.bodies.get(state.robot.name);
-      if (robot) {
-        robot.updateState(state.robot);
-      }
-    }
-
+    // Update all body states
     state.bodies.forEach((bodyState) => {
       const body = this.app.bodies.get(bodyState.name);
       if (body) {
+        // Update the body state - this handles both batched and non-batched formats
         body.updateState(bodyState);
       }
     });
 
-    this.app.bodyStateWindow.update();
+    // Update the body state window display
+    if (this.app.bodyStateWindow) {
+      this.app.bodyStateWindow.update();
+    }
   }
 }

@@ -60,7 +60,10 @@ export function createGeometry(shape, geometryConfig) {
   let geometry;
 
   switch (shape.type) {
-    case 0: // Box
+    case 0: // Custom shape without geometry
+      geometry = null;
+      break;
+    case 1: // Box
       geometry = new THREE.BoxGeometry(
         shape.hx * 2,
         shape.hy * 2,
@@ -70,14 +73,14 @@ export function createGeometry(shape, geometryConfig) {
         config.box.depthSegments,
       );
       break;
-    case 1: // Sphere
+    case 2: // Sphere
       geometry = new THREE.SphereGeometry(
         shape.radius,
         config.sphere.widthSegments,
         config.sphere.heightSegments,
       );
       break;
-    case 2: // Cylinder
+    case 3: // Cylinder
       geometry = new THREE.CylinderGeometry(
         shape.radius,
         shape.radius,
@@ -166,11 +169,11 @@ export function createContactPoints(pointCloud, pointsConfig) {
     vertexShader: `
       attribute float size;
       uniform bool sizeAttenuation;
-      
+
       void main() {
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
-        
+
         // Handle size attenuation
         if (sizeAttenuation) {
           gl_PointSize = size * (300.0 / -mvPosition.z);
@@ -185,24 +188,24 @@ export function createContactPoints(pointCloud, pointsConfig) {
       uniform bool useTexture;
       uniform sampler2D pointTexture;
       uniform float alphaTest;
-      
+
       void main() {
         // Create a circular point with smooth edges
         vec2 center = gl_PointCoord - vec2(0.5);
         float dist = length(center) * 2.0;
-        
+
         // Smooth circle with anti-aliasing
         float alpha = 1.0 - smoothstep(0.8, 1.0, dist);
-        
+
         // Apply alpha test
         if (alpha < alphaTest) discard;
-        
+
         vec4 outputColor = vec4(color, alpha * opacity);
         if (useTexture) {
           vec4 texColor = texture2D(pointTexture, gl_PointCoord);
           outputColor *= texColor;
         }
-        
+
         gl_FragColor = outputColor;
       }
     `,

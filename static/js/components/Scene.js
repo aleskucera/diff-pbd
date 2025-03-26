@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GridHelper } from "three";
-import { setupControls } from "./Controls.js";
+import { setupControls } from "./InteractionControls.js";
 import {
   SCENE_CONFIG,
   RENDERER_CONFIG,
@@ -67,42 +67,4 @@ function setupLighting(scene) {
   );
   directionalLight.position.set(...LIGHTING_CONFIG.directional.position);
   scene.add(directionalLight);
-}
-
-function setupGround(scene) {
-  // Create grid helper
-  const grid = new GridHelper(
-    GROUND_CONFIG.size,
-    GROUND_CONFIG.divisions,
-    GROUND_CONFIG.gridColor,
-    GROUND_CONFIG.gridColor,
-  );
-
-  // Rotate grid to match Z-up coordinate system
-  grid.rotation.set(-Math.PI / 2, 0, 0);
-
-  // Create ground plane
-  const groundGeometry = new THREE.PlaneGeometry(
-    GROUND_CONFIG.size,
-    GROUND_CONFIG.size,
-  );
-
-  const groundMaterial = new THREE.MeshPhongMaterial({
-    color: GROUND_CONFIG.mainColor,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.5,
-  });
-
-  const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-
-  // Rotate and position the ground to match the grid
-  ground.rotation.set(...GROUND_CONFIG.rotation);
-  ground.position.set(...GROUND_CONFIG.position);
-
-  // Add both grid and ground to scene
-  scene.add(grid);
-  scene.add(ground);
-
-  return { grid, ground };
 }

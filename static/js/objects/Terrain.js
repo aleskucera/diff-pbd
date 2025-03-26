@@ -2,15 +2,26 @@ import * as THREE from "three";
 import { TERRAIN_CONFIG, APP_CONFIG } from "../config.js";
 
 export class Terrain {
-  constructor(terrainData) {
+  constructor(terrainData, app) {
     this.terrainData = terrainData;
+    this.app = app; // Store reference to app for accessing batch manager
     this.group = new THREE.Group();
     this.group.name = "TerrainGround";
 
     this.visualizations = new Map();
     this.currentColorMap = APP_CONFIG.terrainColorMap || "viridis";
+    this.batchGroups = null; // Will hold terrain instances for each batch
 
     this.createVisualRepresentations();
+
+    // Create batch visualizations if needed
+    if (
+      this.app &&
+      this.app.batchManager &&
+      this.app.batchManager.getBatchCount() > 1
+    ) {
+      this.createBatchedTerrains(this.app.batchManager.getBatchCount());
+    }
   }
 
   createVisualRepresentations() {
@@ -60,11 +71,85 @@ export class Terrain {
     }
   }
 
+  /**
+   * Create additional terrain instances for each batch beyond the first
+   * @param {number} batchCount - Total number of batches to create
+   */
+  createBatchedTerrains(batchCount) {
+    if (!this.terrainData || batchCount <= 1) return;
+
+    console.log(`Creating ${batchCount - 1} additional terrain instances`);
+
+    // Store original group as batch 0
+    this.batchGroups = [this.group];
+
+    // Create terrain instances for additional batches
+    for (let i = 1; i < batchCount; i++) {
+      // Clone the terrain geometry for each visualization
+      const clonedVisualizations = new Map();
+
+      // Clone each visualization type (surface, wireframe)
+      for (const [name, viz] of this.visualizations.entries()) {
+        // Deep clone the geometry
+        const clonedGeometry = viz.object.geometry.clone();
+
+        // Create a new material (shallow copy is fine for materials)
+        const clonedMaterial = viz.object.material.clone();
+
+        // Create a new mesh with cloned geometry and material
+        const clonedMesh = new THREE.Mesh(clonedGeometry, clonedMaterial);
+        clonedMesh.visible = viz.object.visible;
+        clonedMesh.receiveShadow = viz.object.receiveShadow;
+        clonedMesh.castShadow = viz.object.castShadow;
+
+        clonedVisualizations.set(name, { object: clonedMesh });
+      }
+
+      // Create a new group for this batch
+      const batchGroup = new THREE.Group();
+      batchGroup.name = `TerrainGround_batch_${i}`;
+
+      // Add visualizations to the group
+      for (const [name, viz] of clonedVisualizations.entries()) {
+        batchGroup.add(viz.object);
+      }
+
+      // Clone normal vectors if they exist
+      if (this.normalVectors) {
+        const clonedNormals = this.normalVectors.clone(true);
+        clonedNormals.visible = this.normalVectors.visible;
+        batchGroup.add(clonedNormals);
+      }
+
+      // Apply offset if available
+      if (this.app.batchManager) {
+        const offset = this.app.batchManager.getBatchOffset(i);
+        batchGroup.position.set(offset.x, offset.y, offset.z);
+      }
+
+      // Add to scene
+      this.app.scene.add(batchGroup);
+      this.batchGroups.push(batchGroup);
+    }
+  }
+
+  /**
+   * Update positions of all batched terrains based on current offsets
+   */
+  updateBatchOffsets() {
+    if (!this.batchGroups || !this.app.batchManager) return;
+
+    for (let i = 1; i < this.batchGroups.length; i++) {
+      const offset = this.app.batchManager.getBatchOffset(i);
+      this.batchGroups[i].position.set(offset.x, offset.y, offset.z);
+    }
+  }
+
   createGeometryFromHeightData() {
     const { dimensions, bounds, heightData, normals } = this.terrainData;
     const { size_x, size_y, resolution_x, resolution_y } = dimensions;
 
-    console.log(
+    console.debug(
       `Creating terrain geometry: ${size_x}x${size_y} m, resolution: ${resolution_x}x${resolution_y}`,
     );
 
@@ -127,7 +212,7 @@ export class Terrain {
       }
     }
     const endTime = performance.now();
-    console.log(`Terrain generation completed in ${endTime - startTime}ms`);
+    console.debug(`Terrain generation completed in ${endTime - startTime}ms`);
 
     // Add colors to the geometry
     geometry.setAttribute("color", colorAttribute);
@@ -219,7 +304,9 @@ export class Terrain {
     const normalLength = TERRAIN_CONFIG.normalLength || 0.5;
     const skipFactor = Math.max(1, Math.floor(resolution_x / 20)); // Adaptive skip factor based on resolution
 
-    console.log(`Creating normal visualization with skip factor ${skipFactor}`);
+    console.debug(
+      `Creating normal visualization with skip factor ${skipFactor}`,
+    );
 
     // Sample normals at regular intervals
     for (let row = 0; row < resolution_y; row += skipFactor) {
@@ -260,72 +347,137 @@ export class Terrain {
     this.group.add(this.normalVectors);
   }
 
-  // Toggle methods for visualizations - similar to Body.js
+  // Toggle methods for visualizations - now updated to support batched terrains
   toggleVisualization(type, visible) {
+    // Toggle in the original terrain
     const visualization = this.visualizations.get(type);
     if (visualization) {
       visualization.object.visible = visible;
     }
+
+    // Toggle in all batched terrains
+    if (this.batchGroups) {
+      for (let i = 1; i < this.batchGroups.length; i++) {
+        const batchGroup = this.batchGroups[i];
+        // Find the corresponding visualization in this batch
+        const batchViz = batchGroup.children.find(
+          (child) =>
+            child.type === "Mesh" &&
+            (type === "wireframe"
+              ? child.material.wireframe
+              : !child.material.wireframe),
+        );
+
+        if (batchViz) {
+          batchViz.visible = visible;
+        }
+      }
+    }
   }
 
   toggleNormalVectors(visible) {
+    // Toggle in the original terrain
     if (this.normalVectors) {
       this.normalVectors.visible = visible;
     } else if (visible && TERRAIN_CONFIG.showNormals) {
       this.createNormalVectors();
       if (this.normalVectors) this.normalVectors.visible = visible;
     }
+
+    // Toggle in all batched terrains
+    if (this.batchGroups) {
+      for (let i = 1; i < this.batchGroups.length; i++) {
+        const batchGroup = this.batchGroups[i];
+        // Find the normal vectors in this batch
+        const normalsGroup = batchGroup.children.find(
+          (child) => child.type === "Group",
+        );
+
+        if (normalsGroup) {
+          normalsGroup.visible = visible;
+        }
+      }
+    }
   }
 
-  // Change the colormap and update the terrain
+  // Change the colormap and update the terrain for all batches
   setColorMap(colorMapName) {
     this.currentColorMap = colorMapName;
-    // Recreate the terrain with the new colormap
+    // Update the main terrain and all batched terrains
     this.updateTerrain();
   }
 
   // Update terrain colors with current colormap
   updateTerrain() {
-    // Get the current surface mesh geometry
-    const surface = this.visualizations.get("surface")?.object;
-    if (!surface) return;
+    const updateTerrainColors = (geometry) => {
+      if (!geometry) return;
 
-    const geometry = surface.geometry;
-    const position = geometry.attributes.position;
-    const colorAttribute = geometry.attributes.color;
+      const position = geometry.attributes.position;
+      const colorAttribute = geometry.attributes.color;
 
-    // Update all colors based on the new colormap
-    for (let i = 0; i < position.count; i++) {
-      // Convert vertex index to grid coordinates
-      const { dimensions, bounds, heightData } = this.terrainData;
-      const { resolution_x, resolution_y } = dimensions;
+      if (!position || !colorAttribute) return;
 
-      const col = i % resolution_x;
-      const invertedRow = Math.floor(i / resolution_x);
-      const row = resolution_y - invertedRow - 1; // Invert row index
+      // Update all colors based on the new colormap
+      for (let i = 0; i < position.count; i++) {
+        // Convert vertex index to grid coordinates
+        const { dimensions, bounds, heightData } = this.terrainData;
+        const { resolution_x, resolution_y } = dimensions;
 
-      // Calculate index in the flattened height data array
-      const dataIndex = row * resolution_x + col;
+        const col = i % resolution_x;
+        const invertedRow = Math.floor(i / resolution_x);
+        const row = resolution_y - invertedRow - 1; // Invert row index
 
-      // Update color based on height
-      if (dataIndex < heightData.length) {
-        const normalizedHeight =
-          (heightData[dataIndex] - bounds.minZ) /
-          (bounds.maxZ - bounds.minZ || 1);
+        // Calculate index in the flattened height data array
+        const dataIndex = row * resolution_x + col;
 
-        const color = this.getColorFromSelectedMap(normalizedHeight);
-        colorAttribute.setXYZ(i, color.r, color.g, color.b);
+        // Update color based on height
+        if (dataIndex < heightData.length) {
+          const normalizedHeight =
+            (heightData[dataIndex] - bounds.minZ) /
+            (bounds.maxZ - bounds.minZ || 1);
+
+          const color = this.getColorFromSelectedMap(normalizedHeight);
+          colorAttribute.setXYZ(i, color.r, color.g, color.b);
+        }
       }
+
+      // Update the buffer
+      colorAttribute.needsUpdate = true;
+    };
+
+    // Update the main terrain surface
+    const surface = this.visualizations.get("surface")?.object;
+    if (surface) {
+      updateTerrainColors(surface.geometry);
     }
 
-    // Update the buffer
-    colorAttribute.needsUpdate = true;
+    // Update all batched terrain surfaces
+    if (this.batchGroups) {
+      for (let i = 1; i < this.batchGroups.length; i++) {
+        const batchGroup = this.batchGroups[i];
+        // Find the surface mesh in this batch
+        const batchSurface = batchGroup.children.find(
+          (child) => child.type === "Mesh" && !child.material.wireframe,
+        );
+
+        if (batchSurface) {
+          updateTerrainColors(batchSurface.geometry);
+        }
+      }
+    }
   }
 
   // Get terrain height at specific world coordinates (x,y)
-  getHeightAt(x, y) {
+  getHeightAt(x, y, batchIndex = 0) {
     if (!this.terrainData || !this.terrainData.heightData) {
       return 0;
+    }
+
+    // If requesting height for a non-zero batch, apply reverse offset
+    if (batchIndex > 0 && this.app && this.app.batchManager) {
+      const offset = this.app.batchManager.getBatchOffset(batchIndex);
+      x -= offset.x;
+      y -= offset.y;
     }
 
     const { dimensions, bounds, heightData } = this.terrainData;
@@ -369,9 +521,16 @@ export class Terrain {
   }
 
   // Get normal at specific world coordinates (x,y)
-  getNormalAt(x, y) {
+  getNormalAt(x, y, batchIndex = 0) {
     if (!this.terrainData || !this.terrainData.normals) {
       return new THREE.Vector3(0, 0, 1); // Default upward normal
+    }
+
+    // If requesting normal for a non-zero batch, apply reverse offset
+    if (batchIndex > 0 && this.app && this.app.batchManager) {
+      const offset = this.app.batchManager.getBatchOffset(batchIndex);
+      x -= offset.x;
+      y -= offset.y;
     }
 
     const { dimensions, bounds, normals } = this.terrainData;
@@ -442,9 +601,16 @@ export class Terrain {
   }
 
   // Helper method to check if a point is in bounds
-  isPointInBounds(x, y) {
+  isPointInBounds(x, y, batchIndex = 0) {
     if (!this.terrainData || !this.terrainData.bounds) {
       return false;
+    }
+
+    // If checking for a non-zero batch, apply reverse offset
+    if (batchIndex > 0 && this.app && this.app.batchManager) {
+      const offset = this.app.batchManager.getBatchOffset(batchIndex);
+      x -= offset.x;
+      y -= offset.y;
     }
 
     const { bounds } = this.terrainData;
@@ -456,11 +622,26 @@ export class Terrain {
     );
   }
 
-  // Update terrain data (e.g., if simulation modifies heights)
+  // Update terrain data and recreate all batches
   updateTerrainData(newTerrainData) {
     this.terrainData = newTerrainData;
 
-    // Remove old visualizations
+    // Store batch count before clearing
+    const batchCount = this.batchGroups?.length || 1;
+
+    // Remove all batched terrains from scene
+    if (this.batchGroups) {
+      for (let i = 1; i < this.batchGroups.length; i++) {
+        if (this.app && this.app.scene) {
+          this.app.scene.remove(this.batchGroups[i]);
+        }
+      }
+    }
+
+    // Clear batch groups
+    this.batchGroups = null;
+
+    // Remove old visualizations from main terrain
     for (const viz of this.visualizations.values()) {
       this.group.remove(viz.object);
     }
@@ -472,12 +653,60 @@ export class Terrain {
 
     this.visualizations.clear();
 
-    // Create new visualizations
+    // Create new main terrain visualizations
     this.createVisualRepresentations();
+
+    // Recreate batched terrains if needed
+    if (this.app && this.app.batchManager && batchCount > 1) {
+      this.createBatchedTerrains(batchCount);
+    }
   }
 
   // Get THREE.js group containing all visualizations
   getObject3D() {
     return this.group;
+  }
+
+  // Get a specific batch terrain group
+  getBatchObject3D(batchIndex) {
+    if (
+      this.batchGroups &&
+      batchIndex >= 0 &&
+      batchIndex < this.batchGroups.length
+    ) {
+      return this.batchGroups[batchIndex];
+    }
+    return this.group; // Default to main group
+  }
+
+  // Clean up resources when terrain is no longer needed
+  dispose() {
+    // Dispose geometries and materials
+    for (const viz of this.visualizations.values()) {
+      if (viz.object.geometry) viz.object.geometry.dispose();
+      if (viz.object.material) viz.object.material.dispose();
+    }
+
+    // Clean up batched terrains
+    if (this.batchGroups) {
+      for (let i = 1; i < this.batchGroups.length; i++) {
+        const batchGroup = this.batchGroups[i];
+
+        // Dispose all children
+        batchGroup.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+
+        // Remove from scene
+        if (this.app && this.app.scene) {
+          this.app.scene.remove(batchGroup);
+        }
+      }
+    }
+
+    // Clear references
+    this.visualizations.clear();
+    this.batchGroups = null;
   }
 }
