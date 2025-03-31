@@ -43,10 +43,11 @@ class FisherBurmeister:
         Returns:
             Tuple (∂φ/∂a, ∂φ/∂b), each matching the shape of a and b.
         """
-        norm = torch.sqrt(a**2 + b**2 + self.epsilon)
-        da = 1.0 - a / norm
-        db = 1.0 - b / norm
-        return da, db
+        with torch.no_grad():
+            norm = torch.sqrt(a**2 + b**2 + self.epsilon)
+            da = 1.0 - a / norm
+            db = 1.0 - b / norm
+            return da, db
 
     def derivative_a(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """Compute ∂φ/∂a."""
@@ -74,9 +75,10 @@ class FisherBurmeister:
         norm = torch.sqrt(a**2 + b**2 + self.epsilon)
         value = a + b - norm
         if return_derivatives:
-            da = 1.0 - a / norm
-            db = 1.0 - b / norm
-            return value, da, db
+            with torch.no_grad():
+                da = 1.0 - a / norm
+                db = 1.0 - b / norm
+                return value, da, db
         return value
     
     
@@ -94,11 +96,12 @@ class ScaledFisherBurmeister:
         return scaled_a + scaled_b - norm
 
     def derivatives(self, a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        scaled_a = self.alpha * a
-        scaled_b = self.beta * b
-        norm = torch.sqrt(scaled_a**2 + scaled_b**2 + self.epsilon)
-        da = self.alpha * (1.0 - scaled_a / norm)
-        db = self.beta * (1.0 - scaled_b / norm)
+        with torch.no_grad():
+            scaled_a = self.alpha * a
+            scaled_b = self.beta * b
+            norm = torch.sqrt(scaled_a**2 + scaled_b**2 + self.epsilon)
+            da = self.alpha * (1.0 - scaled_a / norm)
+            db = self.beta * (1.0 - scaled_b / norm)
         return da, db
 
     def derivative_a(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -115,9 +118,10 @@ class ScaledFisherBurmeister:
         norm = torch.sqrt(scaled_a**2 + scaled_b**2 + self.epsilon)
         value = scaled_a + scaled_b - norm
         if return_derivatives:
-            da = self.alpha * (1.0 - scaled_a / norm)
-            db = self.beta * (1.0 - scaled_b / norm)
-            return value, da, db
+            with torch.no_grad():
+                da = self.alpha * (1.0 - scaled_a / norm)
+                db = self.beta * (1.0 - scaled_b / norm)
+                return value, da, db
         return value
     
     

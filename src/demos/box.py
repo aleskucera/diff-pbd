@@ -2,7 +2,7 @@ import os
 
 import torch
 from demos.utils import save_simulation
-from pbd_torch.collision import collide_batch
+from pbd_torch.collision import collide
 from pbd_torch.constants import ROT_IDENTITY
 from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
@@ -26,9 +26,8 @@ def main():
         device=device,
     )
 
-    model = Model(terrain=terrain, max_contacts_per_body=36)
+    model = Model(terrain=terrain, max_contacts_per_body=16)
     engine = XPBDEngine(iterations=2)
-    engine = NonSmoothNewtonEngine(iterations=10)
 
     # Add robot base
     box = model.add_box(
@@ -39,7 +38,7 @@ def main():
         name="box",
         pos=Vector3(torch.tensor([-0.5, -1.0, 4.5])),
         rot=Quaternion(ROT_IDENTITY),
-        restitution=0.5,
+        restitution=0.2,
         dynamic_friction=0.8,
         n_collision_points=200,
     )
@@ -48,6 +47,9 @@ def main():
     model.body_qd[box, :3] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
     model.body_qd[box, 3:] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
 
+    engine = NonSmoothNewtonEngine(model, iterations=30)
+    # engine_old = NonSmoothNewtonEngineOld(iterations=20)
+
     # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
 
@@ -55,8 +57,13 @@ def main():
 
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
-        collide_batch(model, states[i], collision_margin=0.0)
-        engine.simulate(model, states[i], states[i + 1], control, dt)
+        collide(model, states[i], collision_margin=0.0)
+        engine.simulate(states[i], states[i + 1], control, dt)
+        # engine_old.simulate(model, states[i], states[i + 1], control, dt)
+
+    # Save the residuals
+    residuals = torch.cat(engine._debug_F_x, dim=0)
+    torch.save(residuals, "residuals.pt")
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

@@ -1,57 +1,57 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <title>AldaSim</title>
-    <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
-    />
-    <link rel="icon" type="image/x-icon" href="data:image/x-icon;," />
-    <link
-      rel="stylesheet"
-      href="{{ url_for('static', filename='css/controls.css') }}"
-    />
-    <style>
-      body {
-        margin: 0;
-        background-color: #000;
-        color: #fff;
-      }
-      #info {
-        position: absolute;
-        top: 10px;
-        width: 100%;
-        text-align: center;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="container"></div>
+    <head>
+        <title>AldaSim</title>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
+        />
+        <link rel="icon" type="image/x-icon" href="data:image/x-icon;," />
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='css/controls.css') }}"
+        />
+        <style>
+            body {
+                margin: 0;
+                background-color: #000;
+                color: #fff;
+            }
+            #info {
+                position: absolute;
+                top: 10px;
+                width: 100%;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="container"></div>
 
-    <!-- Add Socket.IO client before other scripts -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+        <!-- Add Socket.IO client before other scripts -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 
-    <!-- Add CCapture.js -->
-    <script src="{{ url_for('static', filename='lib/CCapture.js') }}"></script>
-    <script src="{{ url_for('static', filename='lib/webm-writer-0.2.0.js') }}"></script>
-    <script src="{{ url_for('static', filename='lib/gif.js') }}"></script>
-    <script src="{{ url_for('static', filename='lib/tar.js') }}"></script>
-    <script src="{{ url_for('static', filename='lib/download.js') }}"></script>
-    <script src="{{ url_for('static', filename='lib/js-colormaps.js') }}"></script>
+        <!-- Add CCapture.js -->
+        <script src="{{ url_for('static', filename='lib/CCapture.js') }}"></script>
+        <script src="{{ url_for('static', filename='lib/webm-writer-0.2.0.js') }}"></script>
+        <script src="{{ url_for('static', filename='lib/gif.js') }}"></script>
+        <script src="{{ url_for('static', filename='lib/tar.js') }}"></script>
+        <script src="{{ url_for('static', filename='lib/download.js') }}"></script>
+        <script src="{{ url_for('static', filename='lib/js-colormaps.js') }}"></script>
 
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "https://unpkg.com/three@0.157.0/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.157.0/examples/jsm/"
-        }
-      }
-    </script>
+        <script type="importmap">
+            {
+                "imports": {
+                    "three": "https://cdn.jsdelivr.net/npm/three@v0.174.0/build/three.module.js",
+                    "three/addons/": "https://cdn.jsdelivr.net/npm/three@v0.174.0/examples/jsm/"
+                }
+            }
+        </script>
 
-    <script
-      type="module"
-      src="{{ url_for('static', filename='js/main.js') }}"
-    ></script>
-  </body>
+        <script
+            type="module"
+            src="{{ url_for('static', filename='js/main.js') }}"
+        ></script>
+    </body>
 </html>

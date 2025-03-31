@@ -6,6 +6,7 @@ from typing import NewType
 from typing import Union
 
 import torch
+from jaxtyping import Float
 from pbd_torch.constants import *
 from pbd_torch.terrain import Terrain
 from pbd_torch.transform import *
@@ -232,6 +233,9 @@ class Model:
             [0.0, 0.0, 0.0, 0.0, 0.0, -9.81], dtype=torch.float32, device=device
         ).view(6, 1)
 
+        self.joint_trans_parent = torch.zeros((0, 0, 7, 1), dtype=torch.int32, device=device) # [B, D, 7, 1]
+        self.joint_trans_child = torch.zeros((0, 0, 7, 1), dtype=torch.int32, device=device) # [B, D, 7, 1]
+
     @property
     def body_count(self):
         return self.body_q.shape[0]
@@ -343,6 +347,8 @@ class Model:
             self.requires_grad
         )
 
+        self._add_joint_body_slot()
+
         return body_idx
 
     def add_sphere(
@@ -407,6 +413,9 @@ class Model:
             self.requires_grad
         )
 
+
+        self._add_joint_body_slot()
+
         return body_idx
 
     def add_cylinder(
@@ -466,7 +475,58 @@ class Model:
         d = torch.tensor([dynamic_friction], device=self.device).view(1, 1)
         self.dynamic_friction = torch.cat([self.dynamic_friction, d])
 
+        self._add_joint_body_slot()
+
         return body_idx
+
+    def _add_joint_body_slot(self):
+        """The attributes of the joints (joint_trans_parent, joint_trans_child) are of shape [B, D, 7, 1], where B is
+        the number of bodies in the scene and D is the maximum number of joints per body. This enlarges the body (first) dimension
+        so now the B_new = B_old + 1"""
+        D = self.joint_trans_parent.shape[1]
+        self.joint_trans_parent = torch.cat([self.joint_trans_parent, torch.zeros((1, D, 7, 1), device=self.device)])
+        self.joint_trans_child = torch.cat([self.joint_trans_child, torch.zeros((1, D, 7, 1), device=self.device)])
+
+    def _add_joint_transformations(self,
+        parent_trans: Float[torch.Tensor, "7 1"],
+        parent_index: int,
+        child_trans: Float[torch.Tensor, "7 1"],
+        child_index: int
+    ):
+        """Adds joint transformations to the attributes joint_trans_parent and joint_trans_child, which are of shape [B, D, 7, 1],
+        where B is the number of bodies in the scene and D is the maximum number of joints per body. This function
+        first checks if the transformation slots are full and if so, it enlarges the joint (second) dimension."""
+
+        # Get current dimensions
+        B = self.joint_trans_parent.shape[0]  # number of bodies
+        D = self.joint_trans_parent.shape[1]  # current max joints per body
+
+        assert parent_index >= 0 and parent_index < B, "Invalid parent index"
+        assert child_index >= 0 and child_index < B, "Invalid child index"
+
+        # Check parent body transformations for this body (parent_index)
+        body_transforms = self.joint_trans_parent[parent_index]  # shape [D, 7, 1]
+
+        # Find first zero transformation (all 7 elements are zero)
+        is_zero = torch.all(body_transforms == 0, dim=1)  # shape [D, 1]
+        zero_indices = torch.where(is_zero.squeeze())[0]  # indices where all elements are zero
+
+        if len(zero_indices) == 0:
+            # If no zero slots are found, create a new one
+            self.joint_trans_parent = torch.cat([self.joint_trans_parent,
+                torch.zeros(B, 1, 7, 1, device=self.device)], dim=1)
+            self.joint_trans_child = torch.cat([self.joint_trans_child,
+                torch.zeros(B, 1, 7, 1, device=self.device)], dim=1)
+
+            # New slot index will be the last one
+            slot_idx = D
+        else:
+            # Use first available zero slot
+            slot_idx = zero_indices[0]
+
+        # Add the transformations at the found/created slot
+        self.joint_trans_parent[parent_index, slot_idx] = parent_trans
+        self.joint_trans_child[child_index, slot_idx] = child_trans
 
     def add_hinge_joint(
         self,
@@ -477,8 +537,8 @@ class Model:
         q: float = 0.0,
         qd: float = 0.0,
         act: float = 0.0,
-        parent_xform: torch.Tensor = TRANSFORM_IDENTITY,
-        child_xform: torch.Tensor = TRANSFORM_IDENTITY,
+        parent_trans: torch.Tensor = TRANSFORM_IDENTITY,
+        child_trans: torch.Tensor = TRANSFORM_IDENTITY,
         compliance: float = 0.0,
     ) -> int:
         assert parent >= -1 and parent < self.body_count, "Parent index out of bounds"
@@ -511,11 +571,11 @@ class Model:
         joint_compliance = torch.tensor([compliance], device=self.device).view(1, 1)
         self.joint_compliance = torch.cat([self.joint_compliance, joint_compliance])
 
-        parent_xform = parent_xform.to(self.device).view(1, 7, 1)
-        child_xform = child_xform.to(self.device).view(1, 7, 1)
+        parent_trans = parent_trans.to(self.device).view(1, 7, 1)
+        child_trans = child_trans.to(self.device).view(1, 7, 1)
         # Initialize joint transforms (you might want to modify these based on your needs)
-        self.joint_X_p = torch.cat([self.joint_X_p, parent_xform])
-        self.joint_X_c = torch.cat([self.joint_X_c, child_xform])
+        self.joint_X_p = torch.cat([self.joint_X_p, parent_trans])
+        self.joint_X_c = torch.cat([self.joint_X_c, child_trans])
 
         # Set axis mode to force by default
         self.joint_axis_mode = torch.cat(
@@ -525,6 +585,14 @@ class Model:
         # Set default stiffness and damping
         self.joint_ke = torch.cat([self.joint_ke, torch.zeros((1, 1), device=self.device)])
         self.joint_kd = torch.cat([self.joint_kd, torch.zeros((1, 1), device=self.device)])
+
+        # New
+        self._add_joint_transformations(
+            parent_trans=parent_trans,
+            parent_index=parent,
+            child_trans=child_trans,
+            child_index=child
+        )
 
         return self.joint_count - 1
 
