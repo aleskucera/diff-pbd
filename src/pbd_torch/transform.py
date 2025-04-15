@@ -31,21 +31,21 @@ def quat_mul_batch(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     q = [w, x, y, z]
 
     Args:
-        q1 (torch.Tensor): First quaternions, shape [:, 4, 1]
-        q2 (torch.Tensor): Second quaternions, shape [:, 4, 1]
+        q1 (torch.Tensor): First quaternions, shape [..., 4, 1]
+        q2 (torch.Tensor): Second quaternions, shape [..., 4, 1]
 
     Returns:
-        torch.Tensor: Resulting quaternions, shape [:, 4, 1]
+        torch.Tensor: Resulting quaternions, shape [..., 4, 1]
     """
-    w1, x1, y1, z1 = q1.unbind(1)
-    w2, x2, y2, z2 = q2.unbind(1)
+    w1, x1, y1, z1 = q1.unbind(-2)
+    w2, x2, y2, z2 = q2.unbind(-2)
 
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
     z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
 
-    q_out = torch.stack([w, x, y, z], dim=1)
+    q_out = torch.stack([w, x, y, z], dim=-2)
     return q_out.type(q1.dtype)
 
 
@@ -642,32 +642,6 @@ def relative_transform(body_q_a: torch.Tensor, body_q_b: torch.Tensor) -> torch.
     return torch.cat([t, q])
 
 
-def relative_transform(body_q_a: torch.Tensor, body_q_b: torch.Tensor) -> torch.Tensor:
-    """
-    Compute the relative transform from a to b.
-    This transform can take vectors in the frame of a and transform them to the frame of b.
-
-    Args:
-        body_q_a (torch.Tensor): First transform [x, y, z, qw, qx, qy, qz], shape [7]
-        body_q_b (torch.Tensor): Second transform [x, y, z, qw, qx, qy, qz], shape [7]
-
-    Returns:
-        torch.Tensor: Relative transform, shape [7]
-    """
-    pos_a = body_q_a[:3]
-    pos_b = body_q_b[:3]
-    quat_a = body_q_a[3:]
-    quat_b = body_q_b[3:]
-
-    # Translation: first express (pos_a - pos_b) in the frame of b
-    t = rotate_vector_inverse(pos_a - pos_b, quat_b)
-
-    # Rotation: inverse of quat_a composed with quat_b
-    q = quat_mul(quat_inv(quat_a), quat_b)
-
-    return torch.cat([t, q])
-
-
 def relative_transform_batch(
     body_q_a: torch.Tensor, body_q_b: torch.Tensor
 ) -> torch.Tensor:
@@ -828,10 +802,10 @@ def transform_multiply_batch(
         torch.Tensor: Composed transforms, shape [N, 7, 1]
     """
     # Extract positions and orientations
-    x_a = transform_a[:, :3]  # position of frame A
-    q_a = transform_a[:, 3:]  # orientation of frame A
-    x_b = transform_b[:, :3]  # position of frame B
-    q_b = transform_b[:, 3:]  # orientation of frame B
+    x_a = transform_a[..., :3, :]  # position of frame A
+    q_a = transform_a[..., 3:, :]  # orientation of frame A
+    x_b = transform_b[..., :3, :]  # position of frame B
+    q_b = transform_b[..., 3:, :]  # orientation of frame B
 
     # Combine the rotations
     q = quat_mul_batch(q_a, q_b)
@@ -839,4 +813,4 @@ def transform_multiply_batch(
     # Transform the position
     x = x_a + rotate_vectors_batch(x_b, q_a)
 
-    return torch.cat([x, q], dim=1)
+    return torch.cat([x, q], dim=-2)

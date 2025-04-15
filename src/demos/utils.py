@@ -7,7 +7,7 @@ import torch
 from matplotlib.axes import Axes
 from pbd_torch.model import Model
 from pbd_torch.model import State
-from pbd_torch.transform import rotate_vector
+from pbd_torch.transform import rotate_vector_inverse
 
 
 def save_simulation(model: Model, states: List[State], output_file: str):
@@ -53,9 +53,9 @@ def plot_frame(
     origin = frame[:3]
 
     # Define axes
-    x_axis = rotate_vector(torch.tensor([1.0, 0.0, 0.0]), frame[3:]) * scale
-    y_axis = rotate_vector(torch.tensor([0.0, 1.0, 0.0]), frame[3:]) * scale
-    z_axis = rotate_vector(torch.tensor([0.0, 0.0, 1.0]), frame[3:]) * scale
+    x_axis = rotate_vector_inverse(torch.tensor([1.0, 0.0, 0.0]), frame[3:]) * scale
+    y_axis = rotate_vector_inverse(torch.tensor([0.0, 1.0, 0.0]), frame[3:]) * scale
+    z_axis = rotate_vector_inverse(torch.tensor([0.0, 0.0, 1.0]), frame[3:]) * scale
 
     # Plot axes
     ax.quiver(*origin, *x_axis, color="r")

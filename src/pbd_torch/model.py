@@ -65,25 +65,34 @@ class State:
     def __init__(self):
         self.time = 0.0
 
+        # B - body count
+        # C - maximum contacts per body
+        # D - joint count
+        # P - total number of contacts
+
         # Body-related attributes
-        self.body_q: torch.Tensor = None  # [body_count, 7, 1]
-        self.body_qd: torch.Tensor = None  # [body_count, 6, 1]
-        self.body_f: torch.Tensor = None  # [body_count, 6, 1]
+        self.body_q: torch.Tensor = None  # [B, 7, 1]
+        self.body_qd: torch.Tensor = None  # [B, 6, 1]
+        self.body_f: torch.Tensor = None  # [B, 6, 1]
 
         # Joint-related attributes
-        self.joint_q: torch.Tensor = None  # [joint_count, 1]
-        self.joint_qd: torch.Tensor = None  # [joint_count, 1]
-        self.joint_act: torch.Tensor = None  # [joint_count, 1]
+        self.joint_q: torch.Tensor = None  # [D, 1]
+        self.joint_qd: torch.Tensor = None  # [D, 1]
+        self.joint_act: torch.Tensor = None  # [D, 1]
 
-        # Contact points: Contact points are vectors from the center of mass of the body to the contact point. They are stored in the body frame.
-        # Contact normals: Contact normals are vectors in which direction the contact force is applied (from body A towards body B). They are stored in the body frame.
-        self.contact_mask: torch.Tensor = None  # [body_count, max_contacts]
-        self.contact_normals: torch.Tensor = None  # [body_count, max_contacts, 3, 1]
-        self.contact_points: torch.Tensor = None  # [body_count, max_contacts, 3, 1]
-        self.contact_point_indices: torch.Tensor = None  # [body_count, max_contacts]
-        self.contact_points_ground: torch.Tensor = (
-            None  # [body_count, max_contacts, 3, 1]
-        )
+        # Batched contacts per body
+        self.contact_mask_per_body: torch.Tensor = None  # [B, C]
+        self.contact_points_per_body: torch.Tensor = None  # [B, C, 3, 1]
+        self.contact_normals_per_body: torch.Tensor = None  # [B, C, 3, 1]
+        self.contact_point_indices_per_body: torch.Tensor = None  # [B, C]
+        self.contact_points_ground_per_body: torch.Tensor = None  # [B, C, 3, 1]
+
+        # Flat contacts
+        self.contact_count: int = 0  # Total number of contacts (P)
+        self.contact_points_flat: torch.Tensor = None  # [P, 3, 1]
+        self.contact_normals_flat: torch.Tensor = None  # [P, 3, 1]
+        self.contact_body_indices_flat: torch.Tensor = None  # [P]
+        self.contact_points_ground_flat: torch.Tensor = None  # [P, 3, 1]
 
     @property
     def body_count(self):
@@ -99,9 +108,9 @@ class State:
             return tensor.detach().cpu().tolist() if tensor.numel() > 0 else []
 
         # How to keep the tensor of the similar shape?
-        if self.contact_point_indices is not None:
+        if self.contact_point_indices_per_body is not None:
             contacts = [
-                self.contact_point_indices[i][self.contact_mask[i]]
+                self.contact_point_indices_per_body[i][self.contact_mask_per_body[i]]
                 for i in range(self.body_count)
             ]
         else:
@@ -128,13 +137,16 @@ class State:
 
 
 class Control:
-
     def __init__(self):
-        self.joint_act = torch.zeros((0,), dtype=torch.float32)
+        self.joint_act: torch.Tensor = None
+
+    def add_actuation(self, joint_idx: int, actuation: float):
+        if joint_idx >= self.joint_act.shape[0]:
+            raise IndexError("Joint index out of range")
+        self.joint_act[joint_idx, 0] = actuation
 
 
 class Model:
-
     def __init__(
         self,
         device: torch.device = torch.device("cpu"),
@@ -221,20 +233,14 @@ class Model:
         self.joint_axis = torch.zeros(
             (0, 3, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
-        self.joint_basis = torch.zeros(
-            (0, 3, 3), dtype=torch.float32, device=device, requires_grad=requires_grad
-        )
         self.joint_compliance = torch.zeros(
             (0, 1), dtype=torch.float32, device=device, requires_grad=requires_grad
         )
 
         # System properties
-        self.gravity = torch.tensor(
+        self.g_accel = torch.tensor(
             [0.0, 0.0, 0.0, 0.0, 0.0, -9.81], dtype=torch.float32, device=device
         ).view(6, 1)
-
-        self.joint_trans_parent = torch.zeros((0, 0, 7, 1), dtype=torch.int32, device=device) # [B, D, 7, 1]
-        self.joint_trans_child = torch.zeros((0, 0, 7, 1), dtype=torch.int32, device=device) # [B, D, 7, 1]
 
     @property
     def body_count(self):
@@ -347,8 +353,6 @@ class Model:
             self.requires_grad
         )
 
-        self._add_joint_body_slot()
-
         return body_idx
 
     def add_sphere(
@@ -413,9 +417,6 @@ class Model:
             self.requires_grad
         )
 
-
-        self._add_joint_body_slot()
-
         return body_idx
 
     def add_cylinder(
@@ -475,58 +476,7 @@ class Model:
         d = torch.tensor([dynamic_friction], device=self.device).view(1, 1)
         self.dynamic_friction = torch.cat([self.dynamic_friction, d])
 
-        self._add_joint_body_slot()
-
         return body_idx
-
-    def _add_joint_body_slot(self):
-        """The attributes of the joints (joint_trans_parent, joint_trans_child) are of shape [B, D, 7, 1], where B is
-        the number of bodies in the scene and D is the maximum number of joints per body. This enlarges the body (first) dimension
-        so now the B_new = B_old + 1"""
-        D = self.joint_trans_parent.shape[1]
-        self.joint_trans_parent = torch.cat([self.joint_trans_parent, torch.zeros((1, D, 7, 1), device=self.device)])
-        self.joint_trans_child = torch.cat([self.joint_trans_child, torch.zeros((1, D, 7, 1), device=self.device)])
-
-    def _add_joint_transformations(self,
-        parent_trans: Float[torch.Tensor, "7 1"],
-        parent_index: int,
-        child_trans: Float[torch.Tensor, "7 1"],
-        child_index: int
-    ):
-        """Adds joint transformations to the attributes joint_trans_parent and joint_trans_child, which are of shape [B, D, 7, 1],
-        where B is the number of bodies in the scene and D is the maximum number of joints per body. This function
-        first checks if the transformation slots are full and if so, it enlarges the joint (second) dimension."""
-
-        # Get current dimensions
-        B = self.joint_trans_parent.shape[0]  # number of bodies
-        D = self.joint_trans_parent.shape[1]  # current max joints per body
-
-        assert parent_index >= 0 and parent_index < B, "Invalid parent index"
-        assert child_index >= 0 and child_index < B, "Invalid child index"
-
-        # Check parent body transformations for this body (parent_index)
-        body_transforms = self.joint_trans_parent[parent_index]  # shape [D, 7, 1]
-
-        # Find first zero transformation (all 7 elements are zero)
-        is_zero = torch.all(body_transforms == 0, dim=1)  # shape [D, 1]
-        zero_indices = torch.where(is_zero.squeeze())[0]  # indices where all elements are zero
-
-        if len(zero_indices) == 0:
-            # If no zero slots are found, create a new one
-            self.joint_trans_parent = torch.cat([self.joint_trans_parent,
-                torch.zeros(B, 1, 7, 1, device=self.device)], dim=1)
-            self.joint_trans_child = torch.cat([self.joint_trans_child,
-                torch.zeros(B, 1, 7, 1, device=self.device)], dim=1)
-
-            # New slot index will be the last one
-            slot_idx = D
-        else:
-            # Use first available zero slot
-            slot_idx = zero_indices[0]
-
-        # Add the transformations at the found/created slot
-        self.joint_trans_parent[parent_index, slot_idx] = parent_trans
-        self.joint_trans_child[child_index, slot_idx] = child_trans
 
     def add_hinge_joint(
         self,
@@ -586,14 +536,6 @@ class Model:
         self.joint_ke = torch.cat([self.joint_ke, torch.zeros((1, 1), device=self.device)])
         self.joint_kd = torch.cat([self.joint_kd, torch.zeros((1, 1), device=self.device)])
 
-        # New
-        self._add_joint_transformations(
-            parent_trans=parent_trans,
-            parent_index=parent,
-            child_trans=child_trans,
-            child_index=child
-        )
-
         return self.joint_count - 1
 
     def state(self):
@@ -610,9 +552,7 @@ class Model:
 
     def control(self):
         control = Control()
-        control.joint_act = torch.zeros(
-            (self.joint_count,), dtype=torch.float32, device=self.device
-        )
+        control.joint_act = self.joint_act.clone()
         return control
 
     def serialize(self):

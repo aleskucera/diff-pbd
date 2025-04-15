@@ -1,89 +1,163 @@
 from typing import Tuple
 
 import torch
-from jaxtyping import Float, Bool, Int
-from torch.nn.modules import activation
-from pbd_torch.model import State
+from jaxtyping import Float, Bool
 from pbd_torch.transform import rotate_vectors_batch
 from pbd_torch.transform import transform_multiply_batch
 from pbd_torch.transform import transform_points_batch
 from pbd_torch.ncp import ScaledFisherBurmeister
 from pbd_torch.model import Model
-from pbd_torch.ncp import FisherBurmeister
 
 
 def skew_symmetric_matrix_batch(
-    vectors: Float[torch.Tensor, "N 3 1"]
-) -> Float[torch.Tensor, "N 3 3"]:
+    vectors: Float[torch.Tensor, "D 3 1"]
+) -> Float[torch.Tensor, "D 3 3"]:
     """
     Compute the skew-symmetric matrix of a batch of vectors.
 
     Args:
-        vectors: Tensor of shape [N, 3, 1].
+        vectors: Tensor of shape [D, 3, 1].
 
     Returns:
-        Tensor of shape [N, 3, 3] with skew-symmetric matrices.
+        Tensor of shape [D, 3, 3] with skew-symmetric matrices.
     """
 
-    N = vectors.shape[0]
-    skew = torch.zeros(N, 3, 3, device=vectors.device, dtype=vectors.dtype)
-    skew[:, 0, 1] = -vectors[:, 2].squeeze(-1)
-    skew[:, 0, 2] = vectors[:, 1].squeeze(-1)
-    skew[:, 1, 0] = vectors[:, 2].squeeze(-1)
-    skew[:, 1, 2] = -vectors[:, 0].squeeze(-1)
-    skew[:, 2, 0] = -vectors[:, 1].squeeze(-1)
-    skew[:, 2, 1] = vectors[:, 0].squeeze(-1)
+    D = vectors.shape[0]
+    skew = torch.zeros(D, 3, 3, device=vectors.device, dtype=vectors.dtype)
+    skew[..., 0, 1] = -vectors[..., 2, 0]
+    skew[..., 0, 2] = vectors[..., 1, 0]
+    skew[..., 1, 0] = vectors[..., 2, 0]
+    skew[..., 1, 2] = -vectors[..., 0, 0]
+    skew[..., 2, 0] = -vectors[..., 1, 0]
+    skew[..., 2, 1] = vectors[..., 0, 0]
     return skew
 
 class DynamicsConstraint:
-    def __init__(self, mass_matrix: torch.Tensor,
-                 g_accel: torch.Tensor,
-                 device: torch.device):
-        self.device = device
-        self.mass_matrix = mass_matrix
-        self.g_accel = g_accel.expand(mass_matrix.shape[0], 6, 1)
+    def __init__(self, model: Model):
+        self.device = model.device
+        self.mass_matrix = model.mass_matrix
+        self.g_accel = model.g_accel.expand(self.mass_matrix.shape[0], 6, 1)
+        self.joint_parent = model.joint_parent
+        self.joint_child = model.joint_child
 
     def get_residuals(self,
-        body_vel: Float[torch.Tensor, "body_count 6 1"],
-        body_vel_prev: Float[torch.Tensor, "body_count 6 1"],
-        lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-        lambda_t: Float[torch.Tensor, "body_count 2 * max_contacts 1"],
-        body_f: Float[torch.Tensor, "body_count 6 1"],
-        J_n: Float[torch.Tensor, "body_count max_contacts 6"],
-        J_t: Float[torch.Tensor, "body_count 2 * max_contacts 6"],
-        dt: float,
-    ) -> Float[torch.Tensor, "body_count 6 1"]:
-        return (
+                      body_vel: Float[torch.Tensor, "B 6 1"],
+                      body_vel_prev: Float[torch.Tensor, "B 6 1"],
+                      lambda_n: Float[torch.Tensor, "B C 1"],
+                      lambda_t: Float[torch.Tensor, "B 2C 1"],
+                      lambda_j: Float[torch.Tensor, "5D 1"],
+                      body_f: Float[torch.Tensor, "B 6 1"],
+                      J_n: Float[torch.Tensor, "B C 6"],
+                      J_t: Float[torch.Tensor, "B 2C 6"],
+                      J_j_p: Float[torch.Tensor, "5D 6"],
+                      J_j_c: Float[torch.Tensor, "5D 6"],
+                      dt: float,
+                      ) -> Float[torch.Tensor, "B 6 1"]:
+        """
+        Compute the residuals for the dynamics equations in a physics simulation.
+
+        Args:
+            body_vel: Current body velocities, shape [B, 6, 1], where B is the number of bodies.
+            body_vel_prev: Previous body velocities, shape [B, 6, 1].
+            lambda_n: Normal contact impulses, shape [B, C, 1], where C is the maximum number of contacts per body.
+            lambda_t: Tangential friction impulses, shape [B, 2C, 1].
+            lambda_j: Joint impulses, shape [5D, 1], where D is the number of joints.
+            body_f: External forces on bodies, shape [B, 6, 1].
+            J_n: Normal contact Jacobians, shape [B, C, 6].
+            J_t: Tangential friction Jacobians, shape [B, 2C, 6].
+            J_j_p: Joint Jacobians for parent bodies, shape [5D, 6].
+            J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
+            dt: Time step (scalar).
+
+        Returns:
+            Residuals of the dynamics constraints, shape [B, 6, 1].
+        """
+        B = body_vel.shape[0]  # Body count
+        D = self.joint_parent.shape[0]  # Joint count
+
+        res = (
             torch.matmul(self.mass_matrix, (body_vel - body_vel_prev))  # M @ (v - v_prev)
             - torch.matmul(J_n.transpose(2, 1), lambda_n)  # J_n^T @ λ_n
             - torch.matmul(J_t.transpose(2, 1), lambda_t)  # J_t^T @ λ_t
             - body_f * dt  # f·dt
             - torch.matmul(self.mass_matrix, self.g_accel) * dt  # M @ g·dt
-        )
+        ) # [B, 6, 1]
+
+        if D > 0:
+            joint_impulse = torch.zeros(B, 6, 1, device=self.device) # [B, 6, 1]
+
+            # Reshape J_j_p and J_j_c for batch processing
+            lambda_j_batch = lambda_j.view(D, 5, 1)  # [B, D, 1]
+
+            impulse_p = torch.matmul(J_j_p.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
+            impulse_c = torch.matmul(J_j_c.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
+
+            # Scatter impulses to corresponding bodies
+            joint_impulse.index_add_(0, self.joint_parent, impulse_p) # [B, 6, 1]
+            joint_impulse.index_add_(0, self.joint_child, impulse_c) # [B, 6, 1]
+
+            res = res - joint_impulse  # [B, 6, 1]
+
+        return res
 
     def get_derivatives(self,
-         body_vel: Float[torch.Tensor, "body_count 6 1"],
-         body_vel_prev: Float[torch.Tensor, "body_count 6 1"],
-         lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-         lambda_t: Float[torch.Tensor, "body_count 2 * max_contacts 1"],
-         body_f: Float[torch.Tensor, "body_count 6 1"],
-         J_n: Float[torch.Tensor, "body_count max_contacts 6"],
-         J_t: Float[torch.Tensor, "body_count 2 * max_contacts 6"],
-         dt: float,
-         ) -> Tuple[Float[torch.Tensor, "body_count 6 6"],
-             Float[torch.Tensor, "body_count max_contacts 6"],
-             Float[torch.Tensor, "body_count 2 * max_contacts 6"]]:
+                        J_n: Float[torch.Tensor, "B C 6"],
+                        J_t: Float[torch.Tensor, "B 2C 6"],
+                        J_j_p: Float[torch.Tensor, "D 5 6"],
+                        J_j_c: Float[torch.Tensor, "D 5 6"],
+                        ) -> Tuple[Float[torch.Tensor, "B 6 6"],
+                                   Float[torch.Tensor, "B 6 C"],
+                                   Float[torch.Tensor, "B 6 2C"],
+                                   Float[torch.Tensor, "B 6 5D"]]:
+        """
+        Compute the derivatives of the dynamics residuals with respect to velocities and impulses.
+
+        Args:
+            J_n: Normal contact Jacobians, shape [B, C, 6], where B is the number of bodies and C is the max contacts.
+            J_t: Tangential friction Jacobians, shape [B, 2C, 6].
+            J_j_p: Joint Jacobians for parent bodies, shape [D, 5, 6], where D is the number of joints.
+            J_j_c: Joint Jacobians for child bodies, shape [D, 5, 6].
+
+        Returns:
+            Tuple containing:
+                - ∂res/∂body_vel: Derivative w.r.t. body velocities, shape [B, 6, 6].
+                - ∂res/∂lambda_n: Derivative w.r.t. normal impulses, shape [B, 6, C].
+                - ∂res/∂lambda_t: Derivative w.r.t. tangential impulses, shape [B, 6, 2C].
+                - ∂res/∂lambda_j: Derivative w.r.t. joint impulses, shape [B, 6, 5D].
+        """
+        B = J_n.shape[0]  # Body count
+        D = self.joint_parent.shape[0]  # Joint count
+
         # ∂res/∂body_vel
-        dres_dbody_vel = self.mass_matrix # [B, 6, 6]
+        dres_dbody_vel = self.mass_matrix  # [B, 6, 6]
 
         # ∂res/∂lambda_n
-        dres_dlambda_n = -J_n.transpose(1, 2) # [B, 6, C]
+        dres_dlambda_n = -J_n.transpose(1, 2)  # [B, 6, C]
 
         # ∂res/∂lambda_t
-        dres_dlambda_t = -J_t.transpose(1, 2) # [B, 6, 2C]
+        dres_dlambda_t = -J_t.transpose(1, 2)  # [B, 6, 2C]
 
-        return dres_dbody_vel, dres_dlambda_n, dres_dlambda_t
+        # ∂res/∂lambda_j
+        dres_dlambda_j = torch.zeros(B, 6, 5 * D, device=self.device)  # [B, 6, 5D]
 
+        if D > 0:
+            # Step 1: Reshape and transpose Jacobians
+            J_j_p_reshaped = J_j_p.transpose(1, 2)  # [D, 6, 5]
+            J_j_c_reshaped = J_j_c.transpose(1, 2)  # [D, 6, 5]
+
+            # Step 2: Create block indices for column positions
+            block_indices = (torch.arange(5, device=self.device).view(1, 1, 5) +
+                             5 * torch.arange(D, device=self.device).view(D, 1, 1)).expand(D, 6, 5)  # [D, 6, 5]
+
+            # Step 3: Create contribution tensors with scatter
+            contrib_p = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_p_reshaped) # [D, 6, 5D]
+            contrib_c = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_c_reshaped) # [D, 6, 5D]
+
+            # Step 4: Accumulate contributions into dres_dlambda_j
+            dres_dlambda_j.index_add_(0, self.joint_parent, contrib_p) # [B, 6, 5D]
+            dres_dlambda_j.index_add_(0, self.joint_child, contrib_c) # [B, 6, 5D]
+
+        return dres_dbody_vel, dres_dlambda_n, dres_dlambda_t, dres_dlambda_j
 
 class ContactConstraint:
     def __init__(self,
@@ -94,11 +168,23 @@ class ContactConstraint:
         self.fb = ScaledFisherBurmeister(alpha=0.3, beta=0.3, epsilon=1e-12)
 
     def get_penetration_depths(self,
-        body_trans: Float[torch.Tensor, "body_count 7 1"],
-        contact_points: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        ground_points: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        contact_normals: Float[torch.Tensor, "body_count max_contacts 3 1"]
-    ) -> Float[torch.Tensor, "body_count max_contacts 1"]:
+                               body_trans: Float[torch.Tensor, "B 7 1"],
+                               contact_points: Float[torch.Tensor, "B C 3 1"],
+                               ground_points: Float[torch.Tensor, "B C 3 1"],
+                               contact_normals: Float[torch.Tensor, "B C 3 1"]
+                               ) -> Float[torch.Tensor, "B C 1"]:
+        """
+        Compute penetration depths for contact points in a physics simulation.
+
+        Args:
+            body_trans: Body transforms (position and quaternion), shape [B, 7, 1], where B is the number of bodies.
+            contact_points: Contact points in local body frame, shape [B, C, 3, 1], where C is max contacts per body.
+            ground_points: Corresponding ground points, shape [B, C, 3, 1].
+            contact_normals: Contact normals in world frame, shape [B, C, 3, 1].
+
+        Returns:
+            Penetration depths for each contact, shape [B, C, 1].
+        """
         B = body_trans.shape[0]  # Body count
         C = contact_points.shape[1]  # Max contacts per body
 
@@ -113,27 +199,25 @@ class ContactConstraint:
         return penetration
 
     def compute_contact_jacobians(self,
-        body_trans: Float[torch.Tensor, "body_count 7 1"],
-        contact_points: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        contact_normals: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        contact_mask: Bool[torch.Tensor, "body_count max_contacts"],
-    ) -> Float[torch.Tensor, "body_count max_contacts 6"]:
-        """Compute the batched contact Jacobian for all bodies and their contacts.
+                                  body_trans: Float[torch.Tensor, "B 7 1"],
+                                  contact_points: Float[torch.Tensor, "B C 3 1"],
+                                  contact_normals: Float[torch.Tensor, "B C 3 1"],
+                                  contact_mask: Bool[torch.Tensor, "B C"],
+                                  ) -> Float[torch.Tensor, "B C 6"]:
+        """
+        Compute contact Jacobians for normal directions in a physics simulation.
 
         Args:
-            body_q: Body transforms in quaternion format [pos, quat]
-            contact_points: Contact points in local body frame
-            contact_normals: Contact normals in world frame
-            contact_mask: Boolean mask indicating active contacts
+            body_trans: Body transforms, shape [B, 7, 1], where B is the number of bodies.
+            contact_points: Contact points in local frame, shape [B, C, 3, 1], where C is max contacts per body.
+            contact_normals: Contact normals in world frame, shape [B, C, 3, 1].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
 
         Returns:
-            Contact Jacobian for normal directions
+            Contact Jacobians for normal directions, shape [B, C, 6].
         """
         B = body_trans.shape[0]  # Number of bodies
         C = contact_mask.shape[1]  # Max contacts per body
-
-        # Initialize the Jacobian with zeros
-        J = torch.zeros((B, C, 6), device=self.device)  # [B, C, 6]
 
         # Transform local contact points to world frame
         q = body_trans[:, 3:].unsqueeze(1).expand(B, C, 4, 1)  # [B, C, 4, 1]
@@ -148,15 +232,31 @@ class ContactConstraint:
         return J
 
     def get_residuals(self,
-        body_vel: Float[torch.Tensor, "body_count 6 1"],
-        body_vel_prev: Float[torch.Tensor, "body_count 6 1"],
-        lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-        J_n: Float[torch.Tensor, "body_count max_contacts 6"],
-        penetration_depth: Float[torch.Tensor, "body_count max_contacts 1"],
-        contact_mask: Bool[torch.Tensor, "body_count max_contacts"],
-        restitution: Float[torch.Tensor, "body_count 1"],
-        dt: float,
-    ) -> Float[torch.Tensor, "body_count max_contacts 1"]:
+                      body_vel: Float[torch.Tensor, "B 6 1"],
+                      body_vel_prev: Float[torch.Tensor, "B 6 1"],
+                      lambda_n: Float[torch.Tensor, "B C 1"],
+                      J_n: Float[torch.Tensor, "B C 6"],
+                      penetration_depth: Float[torch.Tensor, "B C 1"],
+                      contact_mask: Bool[torch.Tensor, "B C"],
+                      restitution: Float[torch.Tensor, "B 1"],
+                      dt: float,
+                      ) -> Float[torch.Tensor, "B C 1"]:
+        """
+        Compute residuals for contact constraints using a stabilized formulation.
+
+        Args:
+            body_vel: Current body velocities, shape [B, 6, 1], where B is the number of bodies.
+            body_vel_prev: Previous body velocities, shape [B, 6, 1].
+            lambda_n: Normal contact impulses, shape [B, C, 1], where C is max contacts per body.
+            J_n: Normal contact Jacobians, shape [B, C, 6].
+            penetration_depth: Penetration depths, shape [B, C, 1].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
+            restitution: Coefficients of restitution, shape [B, 1].
+            dt: Time step (scalar).
+
+        Returns:
+            Residuals for contact constraints, shape [B, C, 1].
+        """
         B = body_vel.shape[0] # Body count
         C = J_n.shape[1] # Maximum contact count per body
 
@@ -178,16 +278,34 @@ class ContactConstraint:
         return res # [B, C, 1]
 
     def get_derivatives(self,
-        body_vel: Float[torch.Tensor, "body_count 6 1"],
-        body_vel_prev: Float[torch.Tensor, "body_count 6 1"],
-        lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-        J_n: Float[torch.Tensor, "body_count max_contacts 6"],
-        penetration_depth: Float[torch.Tensor, "body_count max_contacts 1"],
-        contact_mask: Bool[torch.Tensor, "body_count max_contacts"],
-        restitution: Float[torch.Tensor, "body_count 1"],
-        dt: float,
-    ) -> Tuple[Float[torch.Tensor, "body_count max_contacts 6"],
-        Float[torch.Tensor, "body_count max_contacts max_contacts"]]:
+                        body_vel: Float[torch.Tensor, "B 6 1"],
+                        body_vel_prev: Float[torch.Tensor, "B 6 1"],
+                        lambda_n: Float[torch.Tensor, "B C 1"],
+                        J_n: Float[torch.Tensor, "B C 6"],
+                        penetration_depth: Float[torch.Tensor, "B C 1"],
+                        contact_mask: Bool[torch.Tensor, "B C"],
+                        restitution: Float[torch.Tensor, "B 1"],
+                        dt: float,
+                        ) -> Tuple[Float[torch.Tensor, "B C 6"],
+                                   Float[torch.Tensor, "B C C"]]:
+        """
+        Compute derivatives of contact residuals w.r.t. velocities and normal impulses.
+
+        Args:
+            body_vel: Current body velocities, shape [B, 6, 1], where B is the number of bodies.
+            body_vel_prev: Previous body velocities, shape [B, 6, 1].
+            lambda_n: Normal contact impulses, shape [B, C, 1], where C is max contacts per body.
+            J_n: Normal contact Jacobians, shape [B, C, 6].
+            penetration_depth: Penetration depths, shape [B, C, 1].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
+            restitution: Coefficients of restitution, shape [B, 1].
+            dt: Time step (scalar).
+
+        Returns:
+            Tuple containing:
+                - ∂res/∂body_vel: Derivative w.r.t. body velocities, shape [B, C, 6].
+                - ∂res/∂lambda_n: Derivative w.r.t. normal impulses, shape [B, C, C].
+        """
         B = body_vel.shape[0] # Body count
         C = J_n.shape[1] # Maximum contact count per body
 
@@ -223,22 +341,20 @@ class FrictionConstraint:
         self.eps = 1e-12
 
         self.fb = ScaledFisherBurmeister(alpha=0.3, beta=0.3, epsilon=self.eps)
-        # self.fb = FisherBurmeister(epsilon=self.eps)
 
     @staticmethod
     def _compute_tangential_basis(
-        contact_normals: Float[torch.Tensor, "body_count max_contacts 3 1"]
-    ) -> Tuple[
-        Float[torch.Tensor, "body_count max_contacts 3 1"],
-        Float[torch.Tensor, "body_count max_contacts 3 1"]
-    ]:
-        """Compute orthogonal tangent vectors t1 and t2 for each contact normal.
+            contact_normals: Float[torch.Tensor, "B C 3 1"]
+    ) -> Tuple[Float[torch.Tensor, "B C 3 1"],
+    Float[torch.Tensor, "B C 3 1"]]:
+        """
+        Compute orthogonal tangent vectors for each contact normal.
 
         Args:
-            contact_normals: Contact normals in world frame
+            contact_normals: Contact normals in world frame, shape [B, C, 3, 1], where B is bodies, C is max contacts.
 
         Returns:
-            Tuple of tangent vectors (t1, t2) orthogonal to the contact normals
+            Tuple of tangent vectors (t1, t2), each shape [B, C, 3, 1], orthogonal to the normals.
         """
         device = contact_normals.device
         B = contact_normals.shape[0] # Body count
@@ -263,20 +379,22 @@ class FrictionConstraint:
         return t1, t2
 
     def compute_tangential_jacobians(self,
-        body_trans: Float[torch.Tensor, "body_count 7 1"],
-        contact_points: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        contact_normals: Float[torch.Tensor, "body_count max_contacts 3 1"],
-        contact_mask: Float[torch.Tensor, "body_count max_contacts"]
-    ) -> Float[torch.Tensor, "body_count 2*max_contacts 6"]:
-        """Compute the tangential Jacobian for each contact in both t1 and t2 directions.
+                                     body_trans: Float[torch.Tensor, "B 7 1"],
+                                     contact_points: Float[torch.Tensor, "B C 3 1"],
+                                     contact_normals: Float[torch.Tensor, "B C 3 1"],
+                                     contact_mask: Bool[torch.Tensor, "B C"]
+                                     ) -> Float[torch.Tensor, "B 2C 6"]:
+        """
+        Compute tangential Jacobians for friction directions.
 
         Args:
-            body_q: Body transforms in quaternion format [pos, quat]
-            contact_points: Contact points in local body frame
-            contact_normals: Contact normals in world frame
+            body_trans: Body transforms, shape [B, 7, 1], where B is the number of bodies.
+            contact_points: Contact points in local frame, shape [B, C, 3, 1], where C is max contacts.
+            contact_normals: Contact normals in world frame, shape [B, C, 3, 1].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
 
         Returns:
-            Tangential Jacobian for friction directions
+            Tangential Jacobians for friction directions, shape [B, 2C, 6].
         """
         B = body_trans.shape[0] # Number of bodies
         C = contact_points.shape[1] # Max number of contacts per body
@@ -299,19 +417,34 @@ class FrictionConstraint:
         J_t2[~contact_mask] = 0.0
 
         # Stack into a single tensor with both directions
-        J_t = torch.cat((J_t1, J_t2), dim=1)  # [B, 2*C, 6]
+        J_t = torch.cat((J_t1, J_t2), dim=1)  # [B, 2C, 6]
 
         return J_t
 
     def get_residuals(self,
-        body_vel: Float[torch.Tensor, "body_count 6 1"],
-        lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-        lambda_t: Float[torch.Tensor, "body_count 2*max_contacts 1"],
-        gamma: Float[torch.Tensor, "body_count max_contacts 1"],
-        J_t: Float[torch.Tensor, "body_count 2*max_contacts 6"],
-        contact_mask: Bool[torch.Tensor, "body_count max_contacts"],
-        friction_coeff: Float[torch.Tensor, "body_count 1"]
-    ) -> Float[torch.Tensor, "body_count 3*max_contacts 1"]:
+                      body_vel: Float[torch.Tensor, "B 6 1"],
+                      lambda_n: Float[torch.Tensor, "B C 1"],
+                      lambda_t: Float[torch.Tensor, "B 2C 1"],
+                      gamma: Float[torch.Tensor, "B C 1"],
+                      J_t: Float[torch.Tensor, "B 2C 6"],
+                      contact_mask: Bool[torch.Tensor, "B C"],
+                      friction_coeff: Float[torch.Tensor, "B 1"]
+                      ) -> Float[torch.Tensor, "B 3C 1"]:
+        """
+        Compute residuals for friction constraints in a physics simulation.
+
+        Args:
+            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
+            lambda_n: Normal contact impulses, shape [B, C, 1], where C is max contacts per body.
+            lambda_t: Tangential friction impulses, shape [B, 2C, 1].
+            gamma: Friction cone variables, shape [B, C, 1].
+            J_t: Tangential Jacobians, shape [B, 2C, 6].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
+            friction_coeff: Friction coefficients, shape [B, 1].
+
+        Returns:
+            Residuals for friction constraints, shape [B, 3C, 1].
+        """
         B = body_vel.shape[0]
         C = lambda_n.shape[1]
 
@@ -319,7 +452,7 @@ class FrictionConstraint:
         inactive_mask = 1 - active_mask # [B, C, 1]
 
         # Compute tangential velocity
-        v_t = torch.matmul(J_t, body_vel)  # [B, 2 * C, 1]
+        v_t = torch.matmul(J_t, body_vel)  # [B, 2C, 1]
         v_t1 = v_t[:, :C, :]  # [B, C, 1]
         v_t2 = v_t[:, C:, :]  # [B, C, 1]
 
@@ -343,25 +476,47 @@ class FrictionConstraint:
         res_fr1 = res_fr1_act * active_mask + res_fr1_inact * inactive_mask  # [B, C, 1]
         res_fr2 = res_fr2_act * active_mask + res_fr2_inact * inactive_mask  # [B, C, 1]
 
-        res_fr = torch.cat([res_fr1, res_fr2], dim=1)  # [B, 2*C, 1]
+        res_fr = torch.cat([res_fr1, res_fr2], dim=1)  # [B, 2C, 1]
 
         res_frc_act = self.fb.evaluate(gamma, mu * lambda_n - lambda_t_norm) # [B, C, 1]
         res_frc_inact = - gamma # [B, C, 1]
         res_frc = res_frc_act * active_mask + res_frc_inact * inactive_mask # [B, C, 1]
 
-        res = torch.cat([res_fr, res_frc], dim=1) # [B, 3 * C, 1]
+        res = torch.cat([res_fr, res_frc], dim=1) # [B, 3C, 1]
 
         return res
 
     def get_derivatives(self,
-        body_vel: Float[torch.Tensor, "body_count 6 1"],
-        lambda_n: Float[torch.Tensor, "body_count max_contacts 1"],
-        lambda_t: Float[torch.Tensor, "body_count 2*max_contacts 1"],
-        gamma: Float[torch.Tensor, "body_count max_contacts 1"],
-        J_t: Float[torch.Tensor, "body_count 2*max_contacts 6"],
-        contact_mask: Bool[torch.Tensor, "body_count max_contacts"],
-        friction_coeff: Float[torch.Tensor, "body_count 1"],
-    ):
+                        body_vel: Float[torch.Tensor, "B 6 1"],
+                        lambda_n: Float[torch.Tensor, "B C 1"],
+                        lambda_t: Float[torch.Tensor, "B 2C 1"],
+                        gamma: Float[torch.Tensor, "B C 1"],
+                        J_t: Float[torch.Tensor, "B 2C 6"],
+                        contact_mask: Bool[torch.Tensor, "B C"],
+                        friction_coeff: Float[torch.Tensor, "B 1"],
+                        ) -> Tuple[Float[torch.Tensor, "B 3C 6"],
+                                   Float[torch.Tensor, "B 3C C"],
+                                   Float[torch.Tensor, "B 3C 2C"],
+                                   Float[torch.Tensor, "B 3C C"]]:
+        """
+        Compute derivatives of friction residuals w.r.t. various parameters.
+
+        Args:
+            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
+            lambda_n: Normal contact impulses, shape [B, C, 1], where C is max contacts per body.
+            lambda_t: Tangential friction impulses, shape [B, 2C, 1].
+            gamma: Friction cone variables, shape [B, C, 1].
+            J_t: Tangential Jacobians, shape [B, 2C, 6].
+            contact_mask: Boolean mask for active contacts, shape [B, C].
+            friction_coeff: Friction coefficients, shape [B, 1].
+
+        Returns:
+            Tuple containing:
+                - ∂res/∂body_vel: Derivative w.r.t. body velocities, shape [B, 3C, 6].
+                - ∂res/∂lambda_n: Derivative w.r.t. normal impulses, shape [B, 3C, C].
+                - ∂res/∂lambda_t: Derivative w.r.t. tangential impulses, shape [B, 3C, 2C].
+                - ∂res/∂gamma: Derivative w.r.t. friction cone variables, shape [B, 3C, C].
+        """
         B = body_vel.shape[0]
         C = lambda_n.shape[1]
 
@@ -383,10 +538,10 @@ class FrictionConstraint:
         # ∂res_fr / ∂body_vel
         dres_fr1_dbody_vel = J_t1 * active_mask  # [B, C, 6]
         dres_fr2_dbody_vel = J_t2 * active_mask  # [B, C, 6]
-        dres_fr_dbody_vel = torch.cat([dres_fr1_dbody_vel, dres_fr2_dbody_vel], dim=1)  # [B, 2*C, 6]
+        dres_fr_dbody_vel = torch.cat([dres_fr1_dbody_vel, dres_fr2_dbody_vel], dim=1)  # [B, 2C, 6]
 
         # ∂res_fr / ∂lambda_n
-        dres_fr_dlambda_n = torch.zeros((B, 2 * C, C)) # [B, 2 * C, C]
+        dres_fr_dlambda_n = torch.zeros((B, 2 * C, C)) # [B, 2C, C]
 
         # ∂res_fr / ∂lambda_t
         # For res_fr1 / ∂lambda_t1
@@ -410,13 +565,13 @@ class FrictionConstraint:
         dres_fr2_dlambda_t1 = torch.diag_embed(dres_fr2_dlambda_t1.squeeze(-1))  # [B, C, C]
 
         # Combine derivatives for res_fr1
-        dres_fr1_dlambda_t = torch.cat([dres_fr1_dlambda_t1, dres_fr1_dlambda_t2], dim=2)  # [B, C, 2*C]
+        dres_fr1_dlambda_t = torch.cat([dres_fr1_dlambda_t1, dres_fr1_dlambda_t2], dim=2)  # [B, C, 2C]
 
         # Combine derivatives for res_fr2
-        dres_fr2_dlambda_t = torch.cat([dres_fr2_dlambda_t1, dres_fr2_dlambda_t2], dim=2)  # [B, C, 2*C]
+        dres_fr2_dlambda_t = torch.cat([dres_fr2_dlambda_t1, dres_fr2_dlambda_t2], dim=2)  # [B, C, 2C]
 
         # Combine for complete ∂res_fr / ∂lambda_t
-        dres_fr_dlambda_t = torch.cat([dres_fr1_dlambda_t, dres_fr2_dlambda_t], dim=1)  # [B, 2*C, 2*C]
+        dres_fr_dlambda_t = torch.cat([dres_fr1_dlambda_t, dres_fr2_dlambda_t], dim=1)  # [B, 2C, 2C]
 
         # ∂res_fr / ∂gamma
         dres_fr1_dgamma = (lambda_t1 / (lambda_t_norm + self.eps)) * active_mask  # [B, C, 1]
@@ -425,7 +580,7 @@ class FrictionConstraint:
         dres_fr2_dgamma = (lambda_t2 / (lambda_t_norm + self.eps)) * active_mask  # [B, C, 1]
         dres_fr2_dgamma = torch.diag_embed(dres_fr2_dgamma.squeeze(-1))  # [B, C, C]
 
-        dres_fr_dgamma = torch.cat([dres_fr1_dgamma, dres_fr2_dgamma], dim=1)  # [B, 2*C, C]
+        dres_fr_dgamma = torch.cat([dres_fr1_dgamma, dres_fr2_dgamma], dim=1)  # [B, 2C, C]
 
         # For friction cone constraint (NCP)
         dres_frc_dgamma_act, dres_frc_db_act = self.fb.derivatives(gamma, mu * lambda_n - lambda_t_norm)  # [B, C, 1]
@@ -446,7 +601,7 @@ class FrictionConstraint:
         dres_frc_dlambda_t2 = -dres_frc_db * lambda_t2 / (lambda_t_norm + self.eps)  # [B, C, 1]
         dres_frc_dlambda_t2 = torch.diag_embed(dres_frc_dlambda_t2.squeeze(-1))  # [B, C, C]
 
-        dres_frc_dlambda_t = torch.cat([dres_frc_dlambda_t1, dres_frc_dlambda_t2], dim=2)  # [B, C, 2*C]
+        dres_frc_dlambda_t = torch.cat([dres_frc_dlambda_t1, dres_frc_dlambda_t2], dim=2)  # [B, C, 2C]
 
         # ∂res_frc / ∂gamma
         dres_frc_dgamma_inact = -torch.ones_like(gamma)  # [B, C, 1]
@@ -455,277 +610,322 @@ class FrictionConstraint:
 
         # Combine all derivatives
         # ∂res / ∂body_vel
-        dres_dbody_vel = torch.cat([dres_fr_dbody_vel, dres_frc_dbody_vel], dim=1)  # [B, 3*C, 6]
+        dres_dbody_vel = torch.cat([dres_fr_dbody_vel, dres_frc_dbody_vel], dim=1)  # [B, 3C, 6]
 
         # ∂res / ∂lambda_n
-        dres_dlambda_n = torch.cat([dres_fr_dlambda_n, dres_frc_dlambda_n], dim=1)  # [B, 3*C, C]
+        dres_dlambda_n = torch.cat([dres_fr_dlambda_n, dres_frc_dlambda_n], dim=1)  # [B, 3C, C]
 
         # ∂res / ∂lambda_t
-        dres_dlambda_t = torch.cat([dres_fr_dlambda_t, dres_frc_dlambda_t], dim=1)  # [B, 3*C, 2*C]
+        dres_dlambda_t = torch.cat([dres_fr_dlambda_t, dres_frc_dlambda_t], dim=1)  # [B, 3C, 2C]
 
         # ∂res / ∂gamma
-        dres_dgamma = torch.cat([dres_fr_dgamma, dres_frc_dgamma], dim=1)  # [B, 3*C, C]
+        dres_dgamma = torch.cat([dres_fr_dgamma, dres_frc_dgamma], dim=1)  # [B, 3C, C]
 
         return dres_dbody_vel, dres_dlambda_n, dres_dlambda_t, dres_dgamma
-
-# L ... number of all joints
-# D ... maximum number of joints per body
-
+    
 class RevoluteConstraint:
-    def __init__(self,
-        model: Model,
-        joint_parent: Int[torch.Tensor, "joint_count"],
-        joint_child: Int[torch.Tensor, "joint_count"],
-        joint_trans_p: Float[torch.Tensor, "joint_count 7 1"],
-        joint_trans_c: Float[torch.Tensor, "joint_count 7 1"],
-        max_joints: int,
-        device: torch.device
-    ):
-        self.joint_parent = joint_parent
-        self.joint_child = joint_child
-        self.joint_trans_p = joint_trans_c
-        self.joint_trans_c = joint_trans_p
-
-        self.max_joints = max_joints
-
-        self.device = device
-
+    def __init__(self, model: Model):
+        self.joint_parent = model.joint_parent
+        self.joint_child = model.joint_child
+        
+        self.joint_trans_parent = model.joint_X_p
+        self.joint_trans_child = model.joint_X_c
+        
+        self.device = model.body_q.device
+        
+        self.stabilization_factor = 0.2
+        self.eps = 1e-10
+        self.weight = 1
+        
+    
     def _get_joint_frames(self,
-        body_trans: Float[torch.Tensor, "body_count 7 1"]
-    ) -> Tuple[Float[torch.Tensor, "joint_count 7 1"],
-        Float[torch.Tensor, "joint_count 7 1"],
-        Float[torch.Tensor, "joint_count 3 1"],
-        Float[torch.Tensor, "joint_count 3 1"]]:
-       B = body_trans.shape[0]
-       L = self.joint_parent.shape[0]
+                          body_trans: Float[torch.Tensor, "B 7 1"]
+                          ) -> Tuple[Float[torch.Tensor, "D 7 1"],
+                                     Float[torch.Tensor, "D 7 1"],
+                                     Float[torch.Tensor, "D 3 1"],
+                                     Float[torch.Tensor, "D 3 1"]]:
+        """
+        Compute joint frames and relative vectors for parent and child bodies.
 
-       parent_transforms = body_trans[self.joint_parent] # [L, 7, 1]
-       child_transforms = body_trans[self.joint_child] # [L, 7, 1]
+        Args:
+            body_trans: Body transforms, shape [B, 7, 1], where B is the number of bodies.
 
-       # Joint frame computed from the parent body
-       X_p = transform_multiply_batch(parent_transforms, self.joint_trans_p)  # [L, 7, 1]
+        Returns:
+            Tuple containing:
+                - X_p: Parent joint frames, shape [D, 7, 1], where D is the number of joints.
+                - X_c: Child joint frames, shape [D, 7, 1].
+                - r_p: Relative vectors for parent, shape [D, 3, 1].
+                - r_c: Relative vectors for child, shape [D, 3, 1].
+        """
+        trans_parent = body_trans[self.joint_parent]
+        trans_child = body_trans[self.joint_child]
 
-       # Joint frame computed from the child body
-       X_c = transform_multiply_batch(child_transforms, self.joint_trans_c)  # [L, 7, 1]
+        # Joint frame computed from the parent and child bodies
+        X_p = transform_multiply_batch(trans_parent, self.joint_trans_parent)  # [D, 7, 1]
+        X_c = transform_multiply_batch(trans_child, self.joint_trans_child) # [D, 7, 1]
 
-       # Get the relative vector from the body frame to joint frame in world coordinates
-       r_p = X_c[:, :3] - X_p[:, :3] # [L, 3, 1]
-       r_c = X_p[:, :3] - X_c[:, :3] # [L, 3, 1]
+        # Get the relative vector from the body frame to joint frame in world coordinates
+        r_p = X_p[:, :3] - trans_parent[:, :3] # [D, 3, 1]
+        r_c = X_c[:, :3] - trans_child[:, :3] # [D, 3, 1]
 
-       return X_p, X_c, r_p, r_c
+        return X_p, X_c, r_p, r_c
 
-    def _get_translational_constraints(self,
-        X_p: Float[torch.Tensor, "joint_count 7 1"],
-        X_c: Float[torch.Tensor, "joint_count 7 1"]
-    ) -> Float[torch.Tensor, "joint_count 3 1"]:
-        constraint_trans = X_p[:, :3] - X_c[:, :3] # [L, 3, 1]
-        return constraint_trans
+    def _get_translational_errors(self,
+                                  X_p: Float[torch.Tensor, "D 7 1"],
+                                  X_c: Float[torch.Tensor, "D 7 1"]
+                                  ) -> Tuple[Float[torch.Tensor, "D 1"],
+                                             Float[torch.Tensor, "D 1"],
+                                             Float[torch.Tensor, "D 1"]]:
+        """
+        Compute translational errors between parent and child joint frames.
 
-    def _get_rotational_constraints(self,
-        X_p: Float[torch.Tensor, "joint_count 7 1"],
-        X_c: Float[torch.Tensor, "joint_count 7 1"]
-    ) -> Float[torch.Tensor, "joint_count 2 1"]:
-        L = X_p.shape[0]
+        Args:
+            X_p: Parent joint frames, shape [D, 7, 1], where D is the number of joints.
+            X_c: Child joint frames, shape [D, 7, 1].
+
+        Returns:
+            Tuple of translational errors (x, y, z), each shape [D, 1].
+        """
+        err_x = X_c[:, 0] - X_p[:, 0] # [D, 1]
+        err_y = X_c[:, 1] - X_p[:, 1] # [D, 1]
+        err_z = X_c[:, 2] - X_p[:, 2] # [D, 1]
+
+        return err_x, err_y, err_z
+
+    def _get_rotational_errors(self,
+                               X_p: Float[torch.Tensor, "D 7 1"],
+                               X_c: Float[torch.Tensor, "D 7 1"]
+                               ) -> Tuple[Float[torch.Tensor, "D 1"],
+                                          Float[torch.Tensor, "D 1"]]:
+        """
+        Compute rotational errors for revolute joints.
+
+        Args:
+            X_p: Parent joint frames, shape [D, 7, 1], where D is the number of joints.
+            X_c: Child joint frames, shape [D, 7, 1].
+
+        Returns:
+            Tuple of rotational errors (x, y), each shape [D, 1].
+        """
+        D = X_p.shape[0]
 
         # Create unit vectors for x, y, and z axes
-        x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(L, 1)  # [L, 3]
-        y_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device).repeat(L, 1)  # [L, 3]
-        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(L, 1)  # [L, 3]
+        x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(D, 1)  # [D, 3]
+        y_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device).repeat(D, 1)  # [D, 3]
+        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(D, 1)  # [D, 3]
 
         # Rotate unit vectors to child and parent frames
-        x_axis_child = rotate_vectors_batch(x_axis.unsqueeze(-1), X_c[:, 3:])  # [L, 3, 1]
-        y_axis_child = rotate_vectors_batch(y_axis.unsqueeze(-1), X_c[:, 3:])  # [L, 3, 1]
-        z_axis_parent = rotate_vectors_batch(z_axis.unsqueeze(-1), X_p[:, 3:])  # [L, 3, 1]
+        x_axis_c = rotate_vectors_batch(x_axis.unsqueeze(-1), X_c[:, 3:]) # [D, 3, 1]
+        y_axis_c = rotate_vectors_batch(y_axis.unsqueeze(-1), X_c[:, 3:]) # [D, 3, 1]
+        z_axis_p = rotate_vectors_batch(z_axis.unsqueeze(-1), X_p[:, 3:]) # [D, 3, 1]
 
         # Rotational constraints: x and y of child perpendicular to z of parent
-        x_constraint = (x_axis_child * z_axis_parent).sum(dim=1).unsqueeze(1)  # [L, 1, 1]
-        y_constraint = (y_axis_child * z_axis_parent).sum(dim=1).unsqueeze(1)  # [L, 1, 1]
+        err_x = torch.matmul(x_axis_c.transpose(1, 2), z_axis_p).squeeze(-1)  # [D, 1]
+        err_y = torch.matmul(y_axis_c.transpose(1, 2), z_axis_p).squeeze(-1)  # [D, 1]
 
-        constraints_rot = torch.cat([x_constraint, y_constraint], dim=1)  # [L, 2, 1]
+        return err_x, err_y
 
-        return constraints_rot
+    def get_errors(self,
+                   body_trans: Float[torch.Tensor, "B 7 1"]
+                   ) -> Float[torch.Tensor, "5D 1"]:
+        """
+        Compute position-level errors for revolute joints.
 
-    def get_values(self, body_trans: Float[torch.Tensor, "body_count 7 1"]):
-        B = body_trans.shape[0]
+        Args:
+            body_trans: Body transforms, shape [B, 7, 1], where B is the number of bodies.
 
-        constraints = torch.zeros(B, self.max_joints, 5, 1, device=self.device) # [B, D, 5, 1]
+        Returns:
+            Errors for each joint constraint, shape [5D, 1], where D is the number of joints.
+        """
+        X_p, X_c, r_p, r_c = self._get_joint_frames(body_trans)  # [D, 7, 1], [D, 7, 1]
 
-        X_p, X_c, _, _ = self._get_joint_frames(body_trans) # [L, 7, 1], [L, 7, 1]
+        err_tx, err_ty, err_tz = self._get_translational_errors(X_p, X_c)  # [D, 1], [D, 1], [D, 1]
 
-        constraint_trans_p = self._get_translational_constraints(X_p, X_c) # [L, 3, 1]
-        constraint_rot_p = self._get_rotational_constraints(X_p, X_c) # [L, 2, 1]
+        err_rx, err_ry = self._get_rotational_errors(X_p, X_c)  # [D, 1], [D, 1]
 
-        constraints_joints_p = torch.cat([constraint_trans_p, constraint_rot_p], dim=1) # [L, 5, 1]
-        constraints_joints_c = -constraints_joints_p # [L, 5, 1]
-        constraints_joints = torch.cat([constraints_joints_p, constraints_joints_c], dim=0) # [2L, 5, 1]
+        errors = torch.stack([err_tx, err_ty, err_tz, err_rx, err_ry], dim=1)  # [D, 5, 1]
 
-        all_body_indices = torch.cat([self.joint_parent, self.joint_child], dim=0)
-        for b in range(B):
-            body_indices = torch.where(all_body_indices == b)[0][:self.max_joints] # [body_joint_count]
-            constraints[b, :self.max_joints] = constraints_joints[body_indices]
+        return errors
 
-        return constraints
+    def _get_translational_jacobians(self,
+                                     r_p: Float[torch.Tensor, "D 3 1"],
+                                     r_c: Float[torch.Tensor, "D 3 1"]
+                                     ) -> Tuple[Float[torch.Tensor, "D 3 6"],
+                                                Float[torch.Tensor, "D 3 6"]]:
+        """
+        Compute translational Jacobians for revolute joints.
 
-    def _get_translational_jacobian(self, X_p, X_c, r_p, r_c):
-        L = X_p.shape[0]
-        E = torch.eye(3, device=self.device).repeat(L, 1, 1) # [L, 3, 3]
-        r_px = skew_symmetric_matrix_batch(r_p) # [L, 3, 3]
-        r_cx = skew_symmetric_matrix_batch(r_c) # [L, 3, 3]
+        Args:
+            r_p: Relative vectors for parent, shape [D, 3, 1], where D is the number of joints.
+            r_c: Relative vectors for child, shape [D, 3, 1].
 
-        J_p = torch.cat([r_px, -E], dim=2) # [L, 3, 6]
-        J_c = torch.cat([-r_cx, E], dim=2) # [L, 3, 6]
+        Returns:
+            Tuple of translational Jacobians for parent and child, each shape [D, 3, 6].
+        """
+        D = r_p.shape[0]  # Number of joints
+
+        # Create the 3x3 identity matrix E_3 and repeat for each joint
+        E_3 = torch.eye(3, device=self.device).unsqueeze(0).repeat(D, 1, 1)  # [D, 3, 3]
+
+        # Compute skew-symmetric matrices for r_p and r_c
+        r_skew_p = skew_symmetric_matrix_batch(r_p)  # [D, 3, 3]
+        r_skew_c = skew_symmetric_matrix_batch(r_c)  # [D, 3, 3]
+
+        J_p = torch.cat([r_skew_p, -E_3], dim=2)  # Shape [D, 3, 6]
+        J_c = torch.cat([-r_skew_c, E_3], dim=2)  # Shape [D, 3, 6]
 
         return J_p, J_c
 
-    def _get_rotational_jacobian(self, X_p, X_c):
-        L = X_p.shape[0]
+    def _get_rotational_jacobians(self,
+                                  X_p: Float[torch.Tensor, "D 7 1"],
+                                  X_c: Float[torch.Tensor, "D 7 1"],
+                                  ) -> Tuple[Float[torch.Tensor, "D 2 6"],
+                                             Float[torch.Tensor, "D 2 6"]]:
+        """
+        Compute rotational Jacobians for revolute joints.
+
+        Args:
+            X_p: Parent joint frames, shape [D, 7, 1], where D is the number of joints.
+            X_c: Child joint frames, shape [D, 7, 1].
+
+        Returns:
+            Tuple of rotational Jacobians for parent and child, each shape [D, 2, 6].
+        """
+        D = X_p.shape[0]
 
         # Create unit vectors for x, y, and z axes
-        x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(L, 1)  # [L, 3]
-        y_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device).repeat(L, 1)  # [L, 3]
-        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(L, 1)  # [L, 3]
+        x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(D, 1)  # [D, 3]
+        y_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device).repeat(D, 1)  # [D, 3]
+        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(D, 1)  # [D, 3]
 
         # Rotate unit vectors to child and parent frames
-        x_axis_child = rotate_vectors_batch(x_axis.unsqueeze(-1), X_c[:, 3:])  # [L, 3, 1]
-        y_axis_child = rotate_vectors_batch(y_axis.unsqueeze(-1), X_c[:, 3:])  # [L, 3, 1]
-        z_axis_parent = rotate_vectors_batch(z_axis.unsqueeze(-1), X_p[:, 3:])  # [L, 3, 1]
+        x_axis_c = rotate_vectors_batch(x_axis.unsqueeze(-1), X_c[:, 3:]) # [D, 3, 1]
+        y_axis_c = rotate_vectors_batch(y_axis.unsqueeze(-1), X_c[:, 3:]) # [D, 3, 1]
+        z_axis_p = rotate_vectors_batch(z_axis.unsqueeze(-1), X_p[:, 3:]) # [D, 3, 1]
 
-        x_c_cross_z_p = torch.linalg.cross(x_axis_child, z_axis_parent, dim=1) # [L, 3, 1]
-        y_c_cross_z_p = torch.linalg.cross(y_axis_child, x_axis_child, dim=1) # [L, 3, 1]
+        x_c_cross_z_p = torch.linalg.cross(x_axis_c, z_axis_p, dim=1).squeeze(-1) # [D, 3]
+        y_c_cross_z_p = torch.linalg.cross(y_axis_c, z_axis_p, dim=1).squeeze(-1) # [D, 3]
 
-        J_p = torch.zeros((L, 2, 6), device=self.device)
-        J_p[:, 0, :3] = x_c_cross_z_p.squeeze(-1)
-        J_p[:, 1, :3] = y_c_cross_z_p.squeeze(-1)
+        zeros = torch.zeros((D, 3), device=self.device, dtype=x_c_cross_z_p.dtype) # [D, 3]
 
-        J_c = torch.zeros((L, 2, 6), device=self.device)
-        J_c[:, 0, :3] = x_c_cross_z_p.squeeze(-1)
-        J_c[:, 1, :3] = y_c_cross_z_p.squeeze(-1)
+        Jx_p = torch.cat([-x_c_cross_z_p, zeros], dim=1) # [D, 6]
+        Jy_p = torch.cat([-y_c_cross_z_p, zeros], dim=1) # [D, 6]
+
+        Jx_c = torch.cat([x_c_cross_z_p, zeros], dim=1) # [D, 6]
+        Jy_c = torch.cat([y_c_cross_z_p, zeros], dim=1) # [D, 6]
+
+        J_p = torch.stack([Jx_p, Jy_p], dim=1) # [D, 2, 6]
+        J_c = torch.stack([Jx_c, Jy_c], dim=1) # [D, 2, 6]
 
         return J_p, J_c
 
-    def _get_jacobian(self, body_trans: torch.Tensor):
-        B = body_trans.shape[0]
-        D = self.max_joints
+    def compute_jacobians(self,
+                          body_trans: Float[torch.Tensor, "B 7 1"]
+                          ) -> Tuple[Float[torch.Tensor, "5D 6"],
+                                     Float[torch.Tensor, "5D 6"]]:
+        """
+        Compute Jacobians for revolute joint constraints.
 
-        J = torch.zeros((B, D, 5, 6), device=self.device)
+        Args:
+            body_trans: Body transforms, shape [B, 7, 1], where B is the number of bodies.
 
-        X_p, X_c, r_p, r_c = self._get_joint_frames(body_trans)
+        Returns:
+            Tuple of Jacobians for parent and child bodies, each shape [5D, 6], where D is the number of joints.
+        """
+        D = self.joint_parent.shape[0]
+        X_p, X_c, r_p, r_c = self._get_joint_frames(body_trans) # [D, 7, 1], [D, 7, 1], [D, 3, 1], [D, 3, 1]
 
-        J_trans_p, J_trans_c = self._get_translational_jacobian(X_p, X_c, r_p, r_c)
-        J_rot_p, J_rot_c = self._get_rotational_jacobian(X_p, X_c)
+        # Get translational Jacobians (3 constraints per joint)
+        Jt_p, Jt_c = self._get_translational_jacobians(r_p, r_c) # [D, 3, 6], [D, 3, 6]
 
-        J_trans_joints = torch.cat([J_trans_p, J_trans_c], dim=0) # [2L, 3, 6]
-        J_rot_joints = torch.cat([J_rot_p, J_rot_c], dim=0) # [2L, 2, 6]
-        all_body_indices = torch.cat([self.joint_parent, self.joint_child], dim=0) # [2L]
+        # Get rotational Jacobians (2 constraints per joint)
+        Jr_p, Jr_c = self._get_rotational_jacobians(X_p, X_c) # [D, 2, 6], [D, 2, 6]
 
-        for b in range(B):
-            body_indices = torch.where(all_body_indices == b)[0][:self.max_joints]  # [num_joints]        constraints = C_joints[joint_indices]
-            J[b, :self.max_joints, :3] = J_trans_joints[body_indices]
-            J[b, :self.max_joints, 3:] = J_rot_joints[body_indices]
+        # Combine translational and rotational Jacobians
+        J_p = torch.cat([Jt_p, Jr_p], dim=1)  # [D, 5, 6]
+        J_c = torch.cat([Jt_c, Jr_c], dim=1)  # [D, 5, 6]
 
-        return J
+        return J_p, J_c
 
+    def get_residuals(self,
+                      body_vel: Float[torch.Tensor, "B 6 1"],
+                      lambda_j: Float[torch.Tensor, "5D 1"],
+                      body_trans: Float[torch.Tensor, "B 7 1"],
+                      J_j_p: Float[torch.Tensor, "5D 6"],
+                      J_j_c: Float[torch.Tensor, "5D 6"],
+                      dt: float
+                      ) -> Float[torch.Tensor, "5D 1"]:
+        """
+        Compute residuals for revolute joint constraints with stabilization.
 
+        Args:
+            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
+            lambda_j: Joint impulses, shape [5D, 1], where D is the number of joints.
+            body_trans: Body transforms, shape [B, 7, 1].
+            J_j_p: Joint Jacobians for parent bodies, shape [5D, 6].
+            J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
+            dt: Time step (scalar).
 
+        Returns:
+            Residuals for joint constraints, shape [5D, 1].
+        """
+        D = self.joint_parent.shape[0]
 
-# def dC_revolute(
-#
-#     body_q: torch.Tensor,
-#     body_qd: torch.Tensor,
-#     joint_parent: torch.Tensor,
-#     joint_child: torch.Tensor,
-#     joint_X_p: torch.Tensor,
-#     joint_X_c: torch.Tensor,
-#     joint_basis: torch.Tensor,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     J_p_trans, J_c_trans = J_translation(
-#         body_q, joint_parent, joint_child, joint_X_p, joint_X_c, joint_basis
-#     )  # ([N, 3, 6], [N, 3, 6])
-#     J_p_rot, J_c_rot = J_rotation(
-#         body_q, joint_parent, joint_child, joint_X_p, joint_X_c, joint_basis
-#     )  # ([N, 2, 6], [N, 2, 6])
+        # Get position-level errors
+        errors = self.get_errors(body_trans) # [D, 5, 1]
 
-#     # Stack the translation and rotation Jacobians
-#     J_p = torch.cat([J_p_trans, J_p_rot], dim=1)  # [N, 5, 6]
-#     J_c = torch.cat([J_c_trans, J_c_rot], dim=1)  # [N, 5, 6]
+        body_vel_p = body_vel[self.joint_parent]
+        body_vel_c = body_vel[self.joint_child]
 
-#     body_qd_p = body_qd[joint_parent]  # [N, 6]
-#     body_qd_c = body_qd[joint_child]  # [N, 6]
-#     dC_p = (J_p * body_qd_p.unsqueeze(1)).sum(dim=2)  # [N, 5]
-#     dC_c = (J_c * body_qd_c.unsqueeze(1)).sum(dim=2)  # [N, 5]
-#     return dC_p, dC_c
+        # Compute velocity-level residuals with Baumgarte stabilization
+        v_j_p = torch.matmul(J_j_p, body_vel_p)  # [D, 5, 6] @ [D, 6, 1] -> [D, 5, 1]
+        v_j_c = torch.matmul(J_j_c, body_vel_c)  # [D, 5, 6] @ [D, 6, 1] -> [D, 5, 1]
 
+        bias = (self.stabilization_factor / dt) * errors  # [D, 5, 1]
 
-# def J_translation(
-#     body_q: torch.Tensor,
-#     joint_parent: torch.Tensor,
-#     joint_child: torch.Tensor,
-#     joint_X_p: torch.Tensor,
-#     joint_X_c: torch.Tensor,
-#     joint_basis: torch.Tensor,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     device = body_q.device
-#     joint_count = joint_parent.shape[0]
-#     E = torch.eye(3, device=device).repeat(joint_count, 1, 1)  # [N, 3, 3]
+        res = self.weight * (v_j_p + v_j_c) + bias  # [D, 5, 1]
 
-#     parent_q = body_q[joint_parent]  # [N, 4]
-#     child_q = body_q[joint_child]  # [N, 4]
+        return res.view(5 * D, 1)  # [5D, 1]
 
-#     # Joint frame from the parent body
-#     X_wj_p = transform_multiply_batch(parent_q, joint_X_p)  # [N, 7]
-#     X_wj_c = transform_multiply_batch(child_q, joint_X_c)  # [N, 7]
+    def get_derivatives(self,
+                        body_vel: Float[torch.Tensor, "B 6 1"],
+                        body_trans: Float[torch.Tensor, "B 7 1"],
+                        J_j_p: Float[torch.Tensor, "5D 6"],
+                        J_j_c: Float[torch.Tensor, "5D 6"],
+                        dt: float
+                        ) -> Float[torch.Tensor, "5D 6B"]:
+        """
+        Compute derivatives of joint residuals w.r.t. body velocities.
 
-#     r_p = X_wj_p[:, :3] - parent_q[:, :3]  # [N, 3]
-#     r_c = X_wj_c[:, :3] - child_q[:, :3]  # [N, 3]
+        Args:
+            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
+            body_trans: Body transforms, shape [B, 7, 1].
+            J_j_p: Joint Jacobians for parent bodies, shape [5D, 6], where D is the number of joints.
+            J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
+            dt: Time step (scalar).
 
-#     r_px = skew_symmetric_matrix_batch(r_p)  # [N, 3, 3]
-#     r_cx = skew_symmetric_matrix_batch(r_c)  # [N, 3, 3]
+        Returns:
+            Derivative ∂res/∂body_vel, shape [5D, 6B].
+        """
+        D = self.joint_parent.shape[0]
+        B = body_vel.shape[0]
 
-#     J_p = torch.cat([r_px, -E], dim=1)  # [N, 3, 6]
-#     J_c = torch.cat([r_cx, E], dim=1)  # [N, 3, 6]
+        # Initialize dense matrix
+        dres_joint_dbody_vel = torch.zeros((5 * D, 6 * B), device=self.device)
 
-#     return J_p, J_c
+        # Vectorized assignment
+        row_indices = torch.arange(5 * D, device=self.device)  # [5D]
+        parent_col_base = 6 * self.joint_parent # [D]
+        child_col_base = 6 * self.joint_child  # [D]
+        col_offsets = torch.arange(6, device=self.device)  # [6]
 
+        # Expand indices for broadcasting
+        parent_cols = (parent_col_base.repeat_interleave(5)[:, None] + col_offsets).flatten()  # [5⋅D⋅6]
+        child_cols = (child_col_base.repeat_interleave(5)[:, None] + col_offsets).flatten()  # [5⋅D⋅6]
+        rows = row_indices.repeat_interleave(6)  # [5⋅D⋅6]
 
-# def J_rotation(
-#     body_q: torch.Tensor,
-#     joint_parent: torch.Tensor,
-#     joint_child: torch.Tensor,
-#     joint_X_p: torch.Tensor,
-#     joint_X_c: torch.Tensor,
-#     joint_basis: torch.Tensor,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     device = body_q.device
-#     joint_count = joint_parent.shape[0]
-#     parent_q = body_q[joint_parent]  # [N, 4]
-#     child_q = body_q[joint_child]  # [N, 4]
+        # Assign values directly
+        dres_joint_dbody_vel[rows, parent_cols] = self.weight * J_j_p.flatten() # [5D, 6B]
+        dres_joint_dbody_vel[rows, child_cols] = self.weight * J_j_c.flatten() # [5D, 6B]
 
-#     X_wj_p = transform_multiply_batch(parent_q, joint_X_p)  # [N, 7]
-#     X_wj_c = transform_multiply_batch(child_q, joint_X_c)  # [N, 7]
-
-#     x_axis = torch.tensor([1.0, 0.0, 0.0], device=device).repeat(
-#         joint_count, 1
-#     )  # [N, 3]
-#     y_axis = torch.tensor([0.0, 1.0, 0.0], device=device).repeat(
-#         joint_count, 1
-#     )  # [N, 3]
-#     z_axis = torch.tensor([0.0, 0.0, 1.0], device=device).repeat(
-#         joint_count, 1
-#     )  # [N, 3]
-
-#     x_axis_child = rotate_vectors_batch(x_axis, X_wj_c)  # [N, 3]
-#     y_axis_child = rotate_vectors_batch(y_axis, X_wj_c)  # [N, 3]
-#     z_axis_parent = rotate_vectors_batch(z_axis, X_wj_p)  # [N, 3]
-
-#     x_c_x_z_p = torch.linalg.cross(x_axis_child, z_axis_parent, dim=1)  # [N, 3]
-#     y_c_x_z_p = torch.linalg.cross(y_axis_child, z_axis_parent, dim=1)  # [N, 3]
-
-#     J_p = torch.zeros(joint_count, 2, 6, device=device)  # [N, 2, 6]
-#     J_p[:, 0, :3] = -x_c_x_z_p
-#     J_p[:, 1, :3] = -y_c_x_z_p
-
-#     J_c = torch.zeros(joint_count, 2, 6, device=device)  # [N, 2, 6]
-#     J_c[:, 0, :3] = x_c_x_z_p
-#     J_c[:, 1, :3] = y_c_x_z_p
-
-#     return J_p, J_c
+        return dres_joint_dbody_vel

@@ -26,9 +26,6 @@ from pbd_torch.transform import transform_points_batch
 
 os.environ["DEBUG"] = "false"
 
-# TODO: Resolve the -1 (world) parent index in the joint
-
-
 def numerical_qd(
     body_q: torch.Tensor,  # [body_count, 7]
     body_q_prev: torch.Tensor,  # [body_count, 7]
@@ -466,14 +463,6 @@ class XPBDEngine:
         body_qd = state_in.body_qd.clone()
         body_f = state_in.body_f.clone()
 
-        # Save the contact points to the state_in
-        state_in.contact_count = model.contact_count
-        state_in.contact_body = model.contact_body.clone()
-        state_in.contact_point = model.contact_point.clone()
-        state_in.contact_normal = model.contact_normal.clone()
-        state_in.contact_point_idx = model.contact_point_idx.clone()
-        state_in.contact_point_ground = model.contact_point_ground.clone()
-
         # ======================================== START: CONTROL ========================================
         # self.logger.section("CONTROL")
         control_time = time.time()
@@ -499,7 +488,7 @@ class XPBDEngine:
             body_f,
             model.body_inv_mass,
             model.body_inv_inertia,
-            model.gravity,
+            model.g_accel,
             dt,
         )
         self.logger.print(f"Integration time: {time.time() - int_time:.5f}")
@@ -522,11 +511,11 @@ class XPBDEngine:
             contact_corr_time = time.time()
             contact_body_q_deltas, lambda_n_deltas = get_ground_contact_deltas(
                 body_q,
-                model.contact_count,
-                model.contact_body,
-                model.contact_point,
-                model.contact_normal,
-                model.contact_point_ground,
+                state_in.contact_count,
+                state_in.contact_body_indices_flat,
+                state_in.contact_points_flat,
+                state_in.contact_normals_flat,
+                state_in.contact_points_ground_flat,
                 model.body_inv_mass,
                 model.body_inv_inertia,
             )
@@ -586,11 +575,11 @@ class XPBDEngine:
         dynamic_friction_deltas = get_dynamic_friction_deltas(
             body_q,
             body_qd,
-            model.contact_count,
-            model.contact_body,
-            model.contact_point,
-            model.contact_normal,
-            model.contact_point_ground,
+            state_in.contact_count,
+            state_in.contact_body_indices_flat,
+            state_in.contact_points_flat,
+            state_in.contact_normals_flat,
+            state_in.contact_points_ground_flat,
             model.body_inv_mass,
             model.body_inv_inertia,
             model.dynamic_friction,
@@ -607,11 +596,11 @@ class XPBDEngine:
             body_q,
             body_qd,
             state_in.body_qd,
-            model.contact_count,
-            model.contact_body,
-            model.contact_point,
-            model.contact_normal,
-            model.contact_point_ground,
+            state_in.contact_count,
+            state_in.contact_body_indices_flat,
+            state_in.contact_points_flat,
+            state_in.contact_normals_flat,
+            state_in.contact_points_ground_flat,
             model.body_inv_mass,
             model.body_inv_inertia,
             model.restitution,

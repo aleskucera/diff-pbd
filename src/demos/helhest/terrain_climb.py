@@ -1,5 +1,4 @@
 import os
-import time
 
 import torch
 from demos.utils import save_simulation
@@ -12,13 +11,11 @@ from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
 from pbd_torch.model import Vector3
 from pbd_torch.terrain import create_terrain_from_exr_file
-from pbd_torch.xpbd_engine import XPBDEngine
 from tqdm import tqdm
-
 
 def main():
     dt = 0.01
-    n_steps = 300
+    n_steps = 100
     device = torch.device("cpu")
     collision_margin = 0.0
     dynamic_friction_threshold = 0.2
@@ -35,12 +32,12 @@ def main():
         terrain=terrain,
         device=device,
         dynamic_friction_threshold=dynamic_friction_threshold,
-        max_contacts_per_body=16,
+        max_contacts_per_body=8,
     )
 
     # Add robot base
     base = model.add_box(
-        m=5.0,
+        m=3.0,
         hx=1.0,
         hy=2.0,
         hz=1.0,
@@ -63,7 +60,7 @@ def main():
         n_collision_points_base=128,
         n_collision_points_surface=128,
         restitution=0.1,
-        dynamic_friction=0.8,
+        dynamic_friction=1.0,
     )
 
     # Add right wheel
@@ -77,7 +74,7 @@ def main():
         n_collision_points_base=128,
         n_collision_points_surface=128,
         restitution=0.1,
-        dynamic_friction=0.8,
+        dynamic_friction=1.0,
     )
 
     # Back wheel
@@ -94,55 +91,50 @@ def main():
         dynamic_friction=0.8,
     )
 
-    # # Add left hinge joint
-    # left_wheel_joint = model.add_hinge_joint(
-    #     parent=base,
-    #     child=left_wheel,
-    #     axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
-    #     name="left_wheel_joint",
-    #     parent_trans=torch.tensor([0.0, 2.5, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    #     child_trans=torch.cat((torch.tensor([0.0, 0.0, -0.5]), ROT_90_X)),
-    # )
 
-    # # Add right hinge joint
-    # right_wheel_joint = model.add_hinge_joint(
-    #     parent=base,
-    #     child=right_wheel,
-    #     axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
-    #     name="right_wheel_joint",
-    #     parent_trans=torch.tensor([0.0, -2.5, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    #     child_trans=torch.cat((torch.tensor([0.0, 0.0, -0.5]), ROT_NEG_90_X)),
-    # )
+    # Add left hinge joint
+    left_wheel_joint = model.add_hinge_joint(
+        parent=base,
+        child=left_wheel,
+        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
+        name="left_wheel_joint",
+        parent_trans=torch.cat((torch.tensor([0.0, 2.5, 0.0]), ROT_NEG_90_X)),
+        child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
+    )
 
-    # # Add back hinge joint
-    # back_wheel_joint = model.add_hinge_joint(
-    #     parent=base,
-    #     child=back_wheel,
-    #     axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
-    #     name="back_wheel_joint",
-    #     parent_trans=torch.tensor([-4.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    #     child_trans=torch.cat((torch.tensor([0.0, 0.0, 0.0]), ROT_90_X)),
-    # )
+    # Add right hinge joint
+    right_wheel_joint = model.add_hinge_joint(
+        parent=base,
+        child=right_wheel,
+        axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
+        name="right_wheel_joint",
+        parent_trans=torch.cat((torch.tensor([0.0, -2.5, 0.0]), ROT_90_X)),
+        child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
+    )
 
-    engine = NonSmoothNewtonEngine(model, iterations=200)
+    # Add back hinge joint
+    back_wheel_joint = model.add_hinge_joint(
+        parent=base,
+        child=back_wheel,
+        axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
+        name="back_wheel_joint",
+        parent_trans=torch.cat((torch.tensor([-4.0, 0.0, 0.0]), ROT_NEG_90_X)),
+        child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+    )
 
-    # Set up the initial state
-    states = [model.state() for _ in range(n_steps)]
+    # Create engine from model
+    engine = NonSmoothNewtonEngine(model, iterations=100)
 
     control = model.control()
+    states = [model.state() for _ in range(n_steps)]
 
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
-        coll_time = time.time()
         collide(model, states[i], collision_margin=collision_margin)
-        # coll_time_batch = time.time()
-        # collide_batch(model, states[i], collision_margin=collision_margin)
-        # print(f"Collision time batch: {time.time() - coll_time_batch}")
-        # control.joint_act[left_wheel_joint] = 120.0
-        # control.joint_act[right_wheel_joint] = 120.0
-        # control.joint_act[back_wheel_joint] = 200.0
-        sim_time = time.time()
+
+        control.add_actuation(left_wheel_joint, 25)
+        control.add_actuation(right_wheel_joint, -25)
+
         engine.simulate(states[i], states[i + 1], control, dt)
-        # print(f"Simulation time: {time.time() - sim_time}")
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

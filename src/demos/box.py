@@ -9,13 +9,12 @@ from pbd_torch.model import Quaternion
 from pbd_torch.model import Vector3
 from pbd_torch.newton_engine import NonSmoothNewtonEngine
 from pbd_torch.terrain import create_terrain_from_exr_file
-from pbd_torch.xpbd_engine import XPBDEngine
 from tqdm import tqdm
 
 
 def main():
     dt = 0.01
-    n_steps = 600
+    n_steps = 400
     device = torch.device("cpu")
     output_file = os.path.join("simulation", "box.json")
 
@@ -26,8 +25,7 @@ def main():
         device=device,
     )
 
-    model = Model(terrain=terrain, max_contacts_per_body=16)
-    engine = XPBDEngine(iterations=2)
+    model = Model(terrain=terrain, max_contacts_per_body=36)
 
     # Add robot base
     box = model.add_box(
@@ -35,7 +33,7 @@ def main():
         hx=0.5,
         hy=0.5,
         hz=0.5,
-        name="box",
+        name="box1",
         pos=Vector3(torch.tensor([-0.5, -1.0, 4.5])),
         rot=Quaternion(ROT_IDENTITY),
         restitution=0.2,
@@ -43,27 +41,19 @@ def main():
         n_collision_points=200,
     )
 
-    # Add initial rotation to the box
-    model.body_qd[box, :3] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
-    model.body_qd[box, 3:] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
+    # # Add initial rotation to the box
+    # model.body_qd[box, :3] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
+    # model.body_qd[box, 3:] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
 
-    engine = NonSmoothNewtonEngine(model, iterations=30)
-    # engine_old = NonSmoothNewtonEngineOld(iterations=20)
-
-    # Set up the initial state
-    states = [model.state() for _ in range(n_steps)]
+    engine = NonSmoothNewtonEngine(model, iterations=100)
 
     control = model.control()
+    states = [model.state() for _ in range(n_steps)]
 
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=0.0)
         engine.simulate(states[i], states[i + 1], control, dt)
-        # engine_old.simulate(model, states[i], states[i + 1], control, dt)
-
-    # Save the residuals
-    residuals = torch.cat(engine._debug_F_x, dim=0)
-    torch.save(residuals, "residuals.pt")
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)
