@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import root
+from jaxtyping import Float
 
 import matplotlib
 matplotlib.use('TkAgg')
@@ -163,21 +164,6 @@ def rk4(q0: torch.Tensor, u0: torch.Tensor, dt: float, num_steps: int):
 
         q_next = q + (k1_q + 2 * k2_q + 2 * k3_q + k4_q) / 6
         u_next = u + (k1_u + 2 * k2_u + 2 * k3_u + k4_u) / 6
-
-        # k1_q = dt * u
-        # k1_u = dt * (-(g / l) * torch.sin(q))
-        #
-        # k2_q = dt * (u + 0.5 * k1_u)
-        # k2_u = dt * (-(g / l) * torch.sin(q + 0.5 * k1_q))
-        #
-        # k3_q = dt * (u + 0.5 * k2_u)
-        # k3_u = dt * (-(g / l) * torch.sin(q + 0.5 * k2_q))
-        #
-        # k4_q = dt * (u + k3_u)
-        # k4_u = dt * (-(g / l) * torch.sin(q + k3_q))
-        #
-        # q_next = q + (k1_q + 2 * k2_q + 2 * k3_q + k4_q) / 6
-        # u_next = u + (k1_u + 2 * k2_u + 2 * k3_u + k4_u) / 6
 
         history["q"].append(q_next.item())
         history["u"].append(u_next.item())

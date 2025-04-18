@@ -77,64 +77,59 @@ def positional_delta(
 
 
 def positional_deltas_batch(
-    body_q_a: torch.Tensor,  # [batch_size, 7]
-    body_q_b: torch.Tensor,  # [batch_size, 7]
-    r_a: torch.Tensor,  # [batch_size, 3]
-    r_b: torch.Tensor,  # [batch_size, 3]
-    m_a_inv: torch.Tensor,  # [batch_size, 1]
-    m_b_inv: torch.Tensor,  # [batch_size, 1]
-    I_a_inv: torch.Tensor,  # [batch_size, 3, 3]
-    I_b_inv: torch.Tensor,  # [batch_size, 3, 3]
+    body_trans_a: torch.Tensor,  # [B, 7, 1]
+    body_trans_b: torch.Tensor,  # [B, 7, 1]
+    r_a: torch.Tensor,  # [B, 3, 1]
+    r_b: torch.Tensor,  # [B, 3, 1]
+    m_a_inv: torch.Tensor,  # [B, 1, 1]
+    m_b_inv: torch.Tensor,  # [B, 1, 1]
+    I_a_inv: torch.Tensor,  # [B, 3, 3]
+    I_b_inv: torch.Tensor,  # [B, 3, 3]
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Batched version of positional_delta that processes multiple constraints at once."""
-    batch_size = body_q_a.shape[0]
-    device = body_q_a.device
+    batch_size = body_trans_a.shape[0]
+    device = body_trans_a.device
 
     # Initialize outputs
-    dbody_q_a = torch.zeros((batch_size, 7), device=device)
-    dbody_q_b = torch.zeros((batch_size, 7), device=device)
-    d_lambda = torch.zeros(batch_size, device=device)
+    dbody_trans_a = torch.zeros((batch_size, 7, 1), device=device)
+    dbody_trans_b = torch.zeros((batch_size, 7, 1), device=device)
+    d_lambda = torch.zeros((batch_size, 1), device=device)
 
     # Extract orientations
-    q_a = body_q_a[:, 3:]  # [batch_size, 4]
-    q_b = body_q_b[:, 3:]  # [batch_size, 4]
+    q_a = body_trans_a[:, 3:]  # [B, 4, 1]
+    q_b = body_trans_b[:, 3:]  # [B, 4, 1]
 
     # Compute the contact points in world space
-    r_a_world = transform_points_batch(r_a, body_q_a)  # [batch_size, 3]
-    r_b_world = transform_points_batch(r_b, body_q_b)  # [batch_size, 3]
+    r_a_world = transform_points_batch(r_a, body_trans_a)  # [B, 3, 1]
+    r_b_world = transform_points_batch(r_b, body_trans_b)  # [B, 3, 1]
 
     # Compute the relative position
-    delta_x = r_a_world - r_b_world  # [batch_size, 3]
+    delta_x = r_a_world - r_b_world  # [B, 3, 1]
 
     # Compute constraint magnitude
-    c = torch.norm(delta_x, dim=1)  # [batch_size]
+    c = torch.norm(delta_x, dim=1, keepdim=True)  # [B, 1, 1]
 
     # Compute normal vectors
-    n = delta_x / (c.unsqueeze(1) + 1e-6)  # [batch_size, 3]
+    n = delta_x / (c + 1e-6)  # [B, 3, 1]
 
     # Rotate normals to body frames
-    n_a = rotate_vectors_inverse_batch(n, q_a)  # [batch_size, 3]
-    n_b = rotate_vectors_inverse_batch(n, q_b)  # [batch_size, 3]
+    n_a = rotate_vectors_inverse_batch(n, q_a)  # [B, 3, 1]
+    n_b = rotate_vectors_inverse_batch(n, q_b)  # [B, 3, 1]
 
     # Compute crosses and dots for weights
-    r_cross_n_a = torch.linalg.cross(r_a, n_a, dim=1)  # [batch_size, 3]
-    r_cross_n_b = torch.linalg.cross(r_b, n_b, dim=1)  # [batch_size, 3]
+    r_cross_n_a = torch.linalg.cross(r_a, n_a, dim=1)  # [B, 3, 1]
+    r_cross_n_b = torch.linalg.cross(r_b, n_b, dim=1)  # [B, 3, 1]
 
     # Compute I_inv @ cross products
-    I_inv_cross_a = torch.bmm(I_a_inv, r_cross_n_a.unsqueeze(2)).squeeze(
-        2
-    )  # [batch_size, 3]
-    I_inv_cross_b = torch.bmm(I_b_inv, r_cross_n_b.unsqueeze(2)).squeeze(
-        2
-    )  # [batch_size, 3]
+    I_inv_cross_a = torch.matmul(I_a_inv, r_cross_n_a)  # [B, 3, 1]
+    I_inv_cross_b = torch.matmul(I_b_inv, r_cross_n_b)  # [B, 3, 1]
 
     # Cross products with r
-    final_cross_a = torch.cross(I_inv_cross_a, r_a, dim=1)  # [batch_size, 3]
-    final_cross_b = torch.cross(I_inv_cross_b, r_b, dim=1)  # [batch_size, 3]
+    final_cross_a = torch.cross(I_inv_cross_a, r_a, dim=1)  # [B, 3, 1]
+    final_cross_b = torch.cross(I_inv_cross_b, r_b, dim=1)  # [B, 3, 1]
 
     # Dot products for weights
-    dot_a = torch.sum(final_cross_a * n_a, dim=1)  # [batch_size]
-    dot_b = torch.sum(final_cross_b * n_b, dim=1)  # [batch_size]
+    dot_a = torch.sum(final_cross_a * n_a, dim=1)  # [B, 1]
+    dot_b = torch.sum(final_cross_b * n_b, dim=1)  # [B, 1]
 
     # Compute weights
     weight_a = m_a_inv.squeeze(1) + dot_a  # [batch_size]
@@ -169,10 +164,10 @@ def positional_deltas_batch(
     dq_b = -0.5 * quat_mul_batch(q_b, w_b_quat)  # [batch_size, 4]
 
     # Combine positional and rotational corrections
-    dbody_q_a = torch.cat([dx_a, dq_a], dim=1)  # [batch_size, 7]
-    dbody_q_b = torch.cat([dx_b, dq_b], dim=1)  # [batch_size, 7]
+    dbody_trans_a = torch.cat([dx_a, dq_a], dim=1)  # [batch_size, 7]
+    dbody_trans_b = torch.cat([dx_b, dq_b], dim=1)  # [batch_size, 7]
 
-    return dbody_q_a, dbody_q_b, d_lambda
+    return dbody_trans_a, dbody_trans_b, d_lambda
 
 
 def joint_angular_delta(
@@ -368,8 +363,8 @@ def joint_deltas_batch(
 
     # Get positional corrections
     dbody_q_p, dbody_q_c, _ = positional_deltas_batch(
-        body_q_a=new_body_q_p,
-        body_q_b=new_body_q_c,
+        body_trans_a=new_body_q_p,
+        body_trans_b=new_body_q_c,
         r_a=X_p[:, :3],
         r_b=X_c[:, :3],
         m_a_inv=m_p_inv,

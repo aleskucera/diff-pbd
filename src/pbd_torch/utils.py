@@ -1,4 +1,6 @@
 import torch
+from pbd_torch.transform import transform_multiply_batch
+from pbd_torch.transform import rotate_vectors_batch
 
 
 def _create_orthogonal_basis(first_axis: torch.Tensor):
@@ -202,3 +204,45 @@ def cylinder_inertia(
         device=device,
         requires_grad=requires_grad,
     )
+
+
+def forces_from_joint_actions(
+        body_trans: torch.Tensor,
+        joint_parent: torch.Tensor,
+        joint_child: torch.Tensor,
+        joint_trans_parent: torch.Tensor,
+        joint_trans_child: torch.Tensor,
+        joint_act: torch.Tensor,
+) -> torch.Tensor:
+    device = body_trans.device
+    B = body_trans.shape[0]
+    D = joint_parent.shape[0]
+
+    body_f = torch.zeros((B, 6, 1), dtype=torch.float32, device=device)
+
+    z_axis = torch.tensor([0.0, 0.0, 1.0], device=device).repeat(D, 1).unsqueeze(-1) # [D, 3, 1]
+
+    trans_parent = body_trans[joint_parent]  # [D, 7, 1]
+    trans_child = body_trans[joint_child]  # [D, 7, 1]
+
+    # Joint frame computed from the parent and child bodies
+    X_p = transform_multiply_batch(trans_parent, joint_trans_parent)  # [D, 7, 1]
+    X_c = transform_multiply_batch(trans_child, joint_trans_child) # [D, 7, 1]
+
+    z_p = rotate_vectors_batch(z_axis, X_p[:, 3:]) # [D, 3, 1]
+    z_c = rotate_vectors_batch(z_axis, X_c[:, 3:]) # [D, 3, 1]
+
+    # TODO: Resolve the joint actions from joint_axis_mode (now just for forces)
+    torque_p = z_p * joint_act.unsqueeze(1) # [D, 3, 1]
+    torque_c = z_c * joint_act.unsqueeze(1) # [D, 3, 1]
+
+    force_p = torch.zeros((D, 6, 1), dtype=torch.float32, device=device)
+    force_p[:, :3] = -torque_p # [D, 3, 1]
+
+    force_c = torch.zeros((D, 6, 1), dtype=torch.float32, device=device)
+    force_c[:, :3] = torque_c # [D, 3, 1]
+
+    body_f.index_add_(0, joint_parent, force_p)
+    body_f.index_add_(0, joint_child, force_c)
+
+    return body_f

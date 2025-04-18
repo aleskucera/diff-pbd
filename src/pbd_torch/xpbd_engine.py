@@ -23,6 +23,7 @@ from pbd_torch.transform import rotate_vectors_batch
 from pbd_torch.transform import rotate_vectors_inverse_batch
 from pbd_torch.transform import transform_multiply_batch
 from pbd_torch.transform import transform_points_batch
+from pbd_torch.utils import forces_from_joint_actions
 
 os.environ["DEBUG"] = "false"
 
@@ -81,36 +82,34 @@ def get_ground_contact_deltas(
     body_count = body_q.shape[0]
 
     # Initialize outputs
-    body_deltas = torch.zeros((body_count, 7), device=device)
-    lambda_n = torch.zeros(body_count, device=device)
+    body_deltas = torch.zeros((body_count, 7, 1), device=device)
+    lambda_n = torch.zeros((body_count, 1), device=device)
 
     # Get body states for all contacts at once
-    body_q_a = body_q[contact_body]  # [contact_count, 7]
-    m_inv_a = body_inv_mass[contact_body].unsqueeze(1)  # [contact_count, 1]
+    body_q_a = body_q[contact_body]  # [contact_count, 7, 1]
+    m_inv_a = body_inv_mass[contact_body]  # [contact_count, 1, 1]
     I_inv_a = body_inv_inertia[contact_body]  # [contact_count, 3, 3]
-    p_a = transform_points_batch(contact_point, body_q_a)  # [contact_count, 3]
+    p_a = transform_points_batch(contact_point, body_q_a)  # [contact_count, 3, 1]
 
-    transform_identity = TRANSFORM_IDENTITY.to(device).unsqueeze(0)
-    body_q_b = transform_identity.repeat(contact_count, 1)  # [contact_count, 7]
-    m_inv_b = torch.zeros(contact_count, 1, device=device)  # [contact_count, 1]
-    I_inv_b = torch.zeros(contact_count, 3, 3, device=device)  # [contact_count, 3, 3]
-    p_b = contact_point_ground  # [contact_count, 3]
+    transform_identity = TRANSFORM_IDENTITY.to(device).unsqueeze(0) # [1, 7]
+    body_q_b = transform_identity.repeat(contact_count, 1).unsqueeze(2)  # [contact_count, 7, 1]
+    m_inv_b = torch.zeros((contact_count, 1, 1), device=device)  # [contact_count, 1, 1]
+    I_inv_b = torch.zeros((contact_count, 3, 3), device=device)  # [contact_count, 3, 3]
+    p_b = contact_point_ground  # [contact_count, 3, 1]
 
     # Check the penetration depth in the normal direction
     # Using dot product of (point_b - point_a) with normal
     # If dot product is negative, there's penetration
-    contact_vector = p_b - p_a  # Vector from ground to contact [contact_count, 3]
-    penetration_depth = torch.bmm(
-        contact_vector.unsqueeze(1), contact_normal.unsqueeze(2)
-    ).squeeze()  # Dot product with normal
+    contact_vector = p_b - p_a  # Vector from ground to contact [contact_count, 3, 1]
+    penetration_depth = torch.matmul(contact_vector.transpose(2, 1), contact_normal).view(-1)  # [P, 1]
 
     penetration_mask = penetration_depth < 0
     corrected_bodies = contact_body[penetration_mask].view(-1)
 
     # Compute position corrections for valid contacts
     dbody_q_batch, _, d_lambda_batch = positional_deltas_batch(
-        body_q_a=body_q_a[penetration_mask].view(-1, 7),
-        body_q_b=body_q_b[penetration_mask].view(-1, 7),
+        body_trans_a=body_q_a[penetration_mask].view(-1, 7),
+        body_trans_b=body_q_b[penetration_mask].view(-1, 7),
         r_a=contact_point[penetration_mask].view(-1, 3),
         r_b=p_b[penetration_mask].view(-1, 3),
         m_a_inv=m_inv_a[penetration_mask].view(-1, 1),
@@ -364,93 +363,19 @@ def get_restitution_deltas(
     return body_deltas
 
 
-def forces_from_joint_actions(
-    body_q: torch.Tensor,
-    joint_parent: torch.Tensor,
-    joint_child: torch.Tensor,
-    joint_X_p: torch.Tensor,
-    joint_X_c: torch.Tensor,
-    joint_axis: torch.Tensor,
-    joint_axis_mode: torch.Tensor,
-    joint_act: torch.Tensor,
-) -> torch.Tensor:
-    """Computes forces from joint actuations.
-
-    Args:
-        body_q (torch.Tensor): Body states [body_count, 7]
-        joint_parent (torch.Tensor): Parent body indices [joint_count]
-        joint_child (torch.Tensor): Child body indices [joint_count]
-        joint_X_p (torch.Tensor): Parent joint transforms [joint_count, 7]
-        joint_X_c (torch.Tensor): Child joint transforms [joint_count, 7]
-        joint_axis (torch.Tensor): Joint axes [joint_count, 3]
-        joint_axis_mode (torch.Tensor): Joint actuation modes [joint_count]
-        joint_act (torch.Tensor): Joint actuation values [joint_count]
-
-    Returns:
-        torch.Tensor: Computed forces for each body
-    """
-    device = body_q.device
-    body_count = body_q.shape[0]
-
-    body_f = torch.zeros((body_count, 6), dtype=torch.float32, device=device)
-
-    parent_q = body_q[joint_parent]
-    child_q = body_q[joint_child]
-
-    X_wj_p = transform_multiply_batch(parent_q, joint_X_p)
-    axis_w = rotate_vectors_batch(joint_axis, X_wj_p[:, 3:])
-
-    # TODO: Resolve the joint actions from joint_axis_mode (now just for forces)
-    joint_torque = axis_w * joint_act.unsqueeze(1)
-
-    body_f[joint_parent, :3] = body_f[joint_parent, :3] - rotate_vectors_inverse_batch(
-        joint_torque, parent_q[:, 3:]
-    )
-    body_f[joint_child, :3] = body_f[joint_child, :3] + rotate_vectors_inverse_batch(
-        joint_torque, child_q[:, 3:]
-    )
-
-    return body_f
-
-
-def eval_joint_force(
-    q: float, qd: float, act: float, ke: float, kd: float, mode: int
-) -> float:
-    """Evaluates joint force based on the joint mode.
-
-    Args:
-        q (float): Joint position
-        qd (float): Joint velocity
-        act (float): Joint actuation
-        ke (float): Position gain
-        kd (float): Velocity gain
-        mode (int): Joint mode (FORCE, TARGET_POSITION, or TARGET_VELOCITY)
-
-    Returns:
-        float: Computed joint force
-    """
-    if mode == JOINT_MODE_FORCE:
-        return act
-    elif mode == JOINT_MODE_TARGET_POSITION:
-        return ke * (act - q) - kd * qd
-    elif mode == JOINT_MODE_TARGET_VELOCITY:
-        return ke * (act - qd)
-    else:
-        raise ValueError("Invalid joint mode")
-
-
 class XPBDEngine:
 
-    def __init__(self, iterations: int = 2, device: torch.device = torch.device("cpu")):
+    def __init__(self, model: Model, iterations: int = 2, device: torch.device = torch.device("cpu")):
         self.iterations = iterations
         self.integrator = SemiImplicitEulerIntegrator(
             use_local_omega=True, device=device
         )
+        self.model = model
+
         self.logger = DebugLogger()
 
     def simulate(
         self,
-        model: Model,
         state_in: State,
         state_out: State,
         control: Control,
@@ -468,14 +393,13 @@ class XPBDEngine:
         control_time = time.time()
         body_f = body_f + forces_from_joint_actions(
             body_q,
-            model.joint_parent,
-            model.joint_child,
-            model.joint_X_p,
-            model.joint_X_c,
-            model.joint_axis,
-            model.joint_axis_mode,
+            self.model.joint_parent,
+            self.model.joint_child,
+            self.model.joint_X_p,
+            self.model.joint_X_c,
             control.joint_act,
         )
+        # TODO: Transform body_f
         state_in.body_f = body_f
         self.logger.print(f"Control time: {time.time() - control_time:.5f}")
         # ======================================== END: CONTROL ========================================
@@ -486,9 +410,9 @@ class XPBDEngine:
             body_q,
             body_qd,
             body_f,
-            model.body_inv_mass,
-            model.body_inv_inertia,
-            model.g_accel,
+            self.model.body_inv_mass,
+            self.model.body_inv_inertia,
+            self.model.g_accel,
             dt,
         )
         self.logger.print(f"Integration time: {time.time() - int_time:.5f}")
@@ -498,7 +422,7 @@ class XPBDEngine:
         # ======================================== START: POSITION SOLVE ========================================
         # self.logger.section("POSITION SOLVE")
         position_solve_time = time.time()
-        n_lambda = torch.zeros(model.body_count, device=body_q.device)
+        n_lambda = torch.zeros(self.model.body_count, device=body_q.device)
         for _ in range(self.iterations):
 
             # self.logger.subsection(f"ITERATION {i + 1}")
@@ -516,8 +440,8 @@ class XPBDEngine:
                 state_in.contact_points_flat,
                 state_in.contact_normals_flat,
                 state_in.contact_points_ground_flat,
-                model.body_inv_mass,
-                model.body_inv_inertia,
+                self.model.body_inv_mass,
+                self.model.body_inv_inertia,
             )
 
             body_q = body_q + contact_body_q_deltas
@@ -537,13 +461,13 @@ class XPBDEngine:
             joint_corr_time = time.time()
             joint_body_q_deltas = get_joint_deltas(
                 body_q,
-                model.joint_parent,
-                model.joint_child,
-                model.joint_X_p,
-                model.joint_X_c,
-                model.joint_axis,
-                model.body_inv_mass,
-                model.body_inv_inertia,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.model.joint_X_p,
+                self.model.joint_X_c,
+                self.model.joint_axis,
+                self.model.body_inv_mass,
+                self.model.body_inv_inertia,
             )
 
             body_q = body_q + joint_body_q_deltas
@@ -580,11 +504,11 @@ class XPBDEngine:
             state_in.contact_points_flat,
             state_in.contact_normals_flat,
             state_in.contact_points_ground_flat,
-            model.body_inv_mass,
-            model.body_inv_inertia,
-            model.dynamic_friction,
+            self.model.body_inv_mass,
+            self.model.body_inv_inertia,
+            self.model.dynamic_friction,
             n_lambda,
-            model.dynamic_friction_threshold,
+            self.model.dynamic_friction_threshold,
             dt,
         )
 
@@ -601,9 +525,9 @@ class XPBDEngine:
             state_in.contact_points_flat,
             state_in.contact_normals_flat,
             state_in.contact_points_ground_flat,
-            model.body_inv_mass,
-            model.body_inv_inertia,
-            model.restitution,
+            self.model.body_inv_mass,
+            self.model.body_inv_inertia,
+            self.model.restitution,
         )
 
         body_qd = body_qd + restitution_deltas + dynamic_friction_deltas

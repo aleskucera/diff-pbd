@@ -7,6 +7,7 @@ from pbd_torch.constants import ROT_IDENTITY
 from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
 from pbd_torch.model import Vector3
+from pbd_torch.xpbd_engine import XPBDEngine
 from pbd_torch.newton_engine import NonSmoothNewtonEngine
 from pbd_torch.terrain import create_terrain_from_exr_file
 from tqdm import tqdm
@@ -46,6 +47,7 @@ def main():
     # model.body_qd[box, 3:] = torch.tensor([0.0, 0.0, 0.0]).view(3, 1)
 
     engine = NonSmoothNewtonEngine(model, iterations=100)
+    xpbd_engine = XPBDEngine(model, iterations=10)
 
     control = model.control()
     states = [model.state() for _ in range(n_steps)]
@@ -53,7 +55,7 @@ def main():
     # Simulate the model
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=0.0)
-        engine.simulate(states[i], states[i + 1], control, dt)
+        xpbd_engine.simulate(states[i], states[i + 1], control, dt)
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)
