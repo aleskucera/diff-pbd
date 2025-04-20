@@ -207,12 +207,12 @@ def cylinder_inertia(
 
 
 def forces_from_joint_actions(
+        joint_act: torch.Tensor,
         body_trans: torch.Tensor,
         joint_parent: torch.Tensor,
         joint_child: torch.Tensor,
         joint_trans_parent: torch.Tensor,
         joint_trans_child: torch.Tensor,
-        joint_act: torch.Tensor,
 ) -> torch.Tensor:
     device = body_trans.device
     B = body_trans.shape[0]

@@ -15,6 +15,8 @@ from pbd_torch.model import Control
 from pbd_torch.model import Model
 from pbd_torch.model import State
 from xitorch.optimize import rootfinder
+from pbd_torch.transform import transform_multiply_batch
+from pbd_torch.transform import rotate_vectors_batch
 from pbd_torch.utils import forces_from_joint_actions
 
 
@@ -82,7 +84,7 @@ class NonSmoothNewtonEngine:
 
         B = model.body_count
         C = model.max_contacts_per_body
-        D = model.joint_count
+        D = model.joint_parent.shape[0]  # Joint count
 
         self._J_n = torch.zeros((B, C, 6), device=device)  # [B, C, 6]
         self._J_t = torch.zeros((B, 2 * C, 6), device=device)  # [B, 2C, 6]
@@ -102,47 +104,23 @@ class NonSmoothNewtonEngine:
         self._debug_iter = 0
         self._debug_F_x = []
 
-    def _compute_attributes(self, state_in: State, control: Control, dt: float) -> None:
-        control_body_f = forces_from_joint_actions(control.joint_act,
-                                                   state_in.body_q,
-                                                   self.model.joint_parent,
-                                                   self.model.joint_child,
-                                                   self.model.joint_X_p,
-                                                   self.model.joint_X_c)
+    def residual(
+        self,
+        x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
+        dt: float
+    ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
+        """
+        Compute the residual F(x) for root finding with XiTorch.
 
-        self._dt = dt
-        self._body_force = state_in.body_f + control_body_f  # [B, 6, 1]
-        self._body_trans = state_in.body_q.clone()  # [B, 7, 1]
-        self._body_vel_prev = state_in.body_qd.clone()  # [B, 6, 1]
-        self._contact_mask = state_in.contact_mask_per_body.clone()  # [B, C, 1]
+        Args:
+            x: Flattened variables tensor [B(6 + 4C) + 5D, 1]
+            dt: Time step (float)
 
-        # Compute normal contact Jacobians
-        self._J_n = self.contact_constraint.compute_contact_jacobians(
-            state_in.body_q,
-            state_in.contact_points_per_body,
-            state_in.contact_normals_per_body,
-            state_in.contact_mask_per_body,
-        )  # [B, C, 6]
-
-        # Compute tangential contact Jacobians
-        self._J_t = self.friction_constraint.compute_tangential_jacobians(
-            state_in.body_q,
-            state_in.contact_points_per_body,
-            state_in.contact_normals_per_body,
-            state_in.contact_mask_per_body,
-        )  # [B, 2C, 6]
-
-        # Compute the penetration depth
-        self._penetration_depth = self.contact_constraint.get_penetration_depths(
-            state_in.body_q,
-            state_in.contact_points_per_body,
-            state_in.contact_points_ground_per_body,
-            state_in.contact_normals_per_body,
-        )  # [B, C, 1]
-
-        self._J_j_p, self._J_j_c = self.revolute_constraint.compute_jacobians(
-            self._body_trans
-        )  # [5D, 6], [5D, 6]
+        Returns:
+            F_x: Flattened residual tensor [B(6 + 4C) + 5D, 1]
+        """
+        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x)
+        return self.compute_F_x(body_vel, lambda_n, lambda_t, gamma, lambda_j, dt)
 
     def flatten_variables(
         self,
@@ -152,6 +130,19 @@ class NonSmoothNewtonEngine:
         gamma: Float[torch.Tensor, "B C 1"],
         lambda_j: Float[torch.Tensor, "5D 1"],
     ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
+        """
+        Flattens all variables into a single vector.
+
+        Args:
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+
+        Returns:
+            Flattened vector [B(6 + 4C) + 5D, 1].
+        """
         x_batched = torch.cat(
             [body_vel, lambda_n, lambda_t, gamma], dim=1
         )  # [B, 6 + C + 2C + C, 1]
@@ -169,9 +160,23 @@ class NonSmoothNewtonEngine:
         Float[torch.Tensor, "B C 1"],
         Float[torch.Tensor, "5D 1"],
     ]:
+        """
+        Unflattens a vector back into individual variables.
+
+        Args:
+            x: Flattened vector [B(6 + 4C) + 5D, 1].
+
+        Returns:
+            Tuple of:
+                body_vel [B, 6, 1],
+                lambda_n [B, C, 1],
+                lambda_t [B, 2C, 1],
+                gamma [B, C, 1],
+                lambda_j [5D, 1].
+        """
         B = self.model.body_count
         C = self.model.max_contacts_per_body
-        D = self.model.joint_count
+        D = self.model.joint_parent.shape[0]
         total_dim_batched = 6 + 4 * C
         x_batched_flat = x[: B * total_dim_batched].view(
             B, total_dim_batched, 1
@@ -183,98 +188,95 @@ class NonSmoothNewtonEngine:
         lambda_j = x[B * total_dim_batched :].view(5 * D, 1)  # [5D, 1]
         return body_vel, lambda_n, lambda_t, gamma, lambda_j
 
-    def flatten_residuals(
+    def compute_F_x(
         self,
-        res_d: Float[torch.Tensor, "B 6 1"],
-        res_n: Float[torch.Tensor, "B C 1"],
-        res_t: Float[torch.Tensor, "B 3C 1"],
-        res_j: Float[torch.Tensor, "5D 1"]
+        body_vel: Float[torch.Tensor, "B 6 1"],
+        lambda_n: Float[torch.Tensor, "B C 1"],
+        lambda_t: Float[torch.Tensor, "B 2C 1"],
+        gamma: Float[torch.Tensor, "B C 1"],
+        lambda_j: Float[torch.Tensor, "5D 1"],
+        dt: float,
     ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
-        res_batched = torch.cat((res_d, res_n, res_t), dim=1)  # [B, 6 + C + 3C, 1]
-        res = torch.cat((res_batched.view(-1, 1), res_j), dim=0)  # [B(6 + 4C) + 5D, 1]
-        return res
+        """
+        Computes the flattened residuals vector F(x).
 
-    def unflatten_residuals(self,
-        res: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
+        Args:
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+            dt: Time step.
+
+        Returns:
+            Flattened residuals vector F(x) [B(6 + 4C) + 5D, 1].
+        """
+        res_d, res_n, res_t, res_j = self.compute_residuals(
+            body_vel, lambda_n, lambda_t, gamma, lambda_j, dt
+        )
+        F_x_batched = torch.cat((res_d, res_n, res_t), dim=1)  # [B, 6 + C + 3C, 1]
+        F_x = torch.cat((F_x_batched.view(-1, 1), res_j), dim=0)  # [B(6 + 4C) + 5D, 1]
+        return F_x
+
+    def compute_residuals(
+        self,
+        body_vel: Float[torch.Tensor, "B 6 1"],
+        lambda_n: Float[torch.Tensor, "B C 1"],
+        lambda_t: Float[torch.Tensor, "B 2C 1"],
+        gamma: Float[torch.Tensor, "B C 1"],
+        lambda_j: Float[torch.Tensor, "5D 1"],
+        dt: float,
     ) -> Tuple[
         Float[torch.Tensor, "B 6 1"],
         Float[torch.Tensor, "B C 1"],
         Float[torch.Tensor, "B 3C 1"],
         Float[torch.Tensor, "5D 1"],
     ]:
-        B = self.model.body_count
-        C = self.model.max_contacts_per_body
-        D = self.model.joint_count
-        total_dim_batched = 6 + 4 * C
-        res_batched_flat = res[:B * total_dim_batched].view(
-            B, total_dim_batched, 1
-        )
-        res_d = res_batched_flat[:, :6, :]  # [B, 6, 1]
-        res_n = res_batched_flat[:, 6 : 6 + C, :]  # [B, C, 1]
-        res_t = res_batched_flat[:, 6 + C : 6 + 3 * C, :]  # [B, 3C, 1]
-        res_j = res[B * total_dim_batched :].view(5 * D, 1)  # [5D, 1]
-        return res_d, res_n, res_t, res_j
+        """
+        Computes the residuals for dynamics, contact, friction, and joint constraints.
 
-    # Inside NonSmoothNewtonEngine class
-    def residual(
-        self,
-        x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
-        body_trans: Float[torch.Tensor, "B 7 1"] = None,
-        body_vel_prev: Float[torch.Tensor, "B 6 1"] = None,
-        body_force: Float[torch.Tensor, "B 6 1"] = None,
-        J_n: Float[torch.Tensor, "B C 6"] = None,
-        J_t: Float[torch.Tensor, "B 2C 6"] = None,
-        J_j_p: Float[torch.Tensor, "5D 6"] = None,
-        J_j_c: Float[torch.Tensor, "5D 6"] = None,
-        penetration_depth: Float[torch.Tensor, "B C 1"] = None,
-        restitution: Float[torch.Tensor, "B C 1"] = None,
-        dynamic_friction: Float[torch.Tensor, "B C 1"] = None,
-    ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
-        # Use default arguments only if parameters are not explicitly provided
-        body_trans = body_trans if body_trans is not None else self._body_trans
-        body_vel_prev = body_vel_prev if body_vel_prev is not None else self._body_vel_prev
-        body_force = body_force if body_force is not None else self._body_force
-        J_n = J_n if J_n is not None else self._J_n
-        J_t = J_t if J_t is not None else self._J_t
-        J_j_p = J_j_p if J_j_p is not None else self._J_j_p
-        J_j_c = J_j_c if J_j_c is not None else self._J_j_c
-        penetration_depth = (
-            penetration_depth if penetration_depth is not None else self._penetration_depth
-        )
-        restitution = restitution if restitution is not None else self.model.restitution
-        dynamic_friction = (
-            dynamic_friction if dynamic_friction is not None else self.model.dynamic_friction
-        )
+        Args:
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+            dt: Time step.
 
-        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x)
+        Returns:
+            Tuple of:
+                res_dynamics [B, 6, 1],
+                res_contact [B, C, 1],
+                res_friction [B, 3C, 1],
+                res_joint [5D, 1].
+        """
 
         # ------------------ Dynamics residual ------------------
-        # Use passed arguments instead of self._...
         res_dynamics = self.dynamics_constraint.get_residuals(
             body_vel,
-            body_vel_prev,
+            self._body_vel_prev,
             lambda_n,
             lambda_t,
             lambda_j,
-            body_force,
-            J_n,
-            J_t,
-            J_j_p,
-            J_j_c,
-            self._dt,
-        )
+            self._body_force,
+            self._J_n,
+            self._J_t,
+            self._J_j_p,
+            self._J_j_c,
+            dt,
+        )  # [B, 6, 1]
 
         # ------------------ Normal contact residual ------------------
         res_contact = self.contact_constraint.get_residuals(
             body_vel,
-            body_vel_prev,
+            self._body_vel_prev,
             lambda_n,
-            J_n,
-            penetration_depth,
+            self._J_n,
+            self._penetration_depth,
             self._contact_mask,
-            restitution,
-            self._dt,
-        )
+            self.model.restitution,
+            dt,
+        )  # [B, C, 1]
 
         # ------------------ Friction contact residuals ------------------
         res_friction = self.friction_constraint.get_residuals(
@@ -282,34 +284,44 @@ class NonSmoothNewtonEngine:
             lambda_n,
             lambda_t,
             gamma,
-            J_t,
+            self._J_t,
             self._contact_mask,
-            dynamic_friction,
-        )
+            self.model.dynamic_friction,
+        )  # [B, 3C, 1]
 
         # ---------------- Joint residuals ------------------
         res_joint = self.revolute_constraint.get_residuals(
-            body_vel,
-            lambda_j,
-            body_trans,
-            J_j_p,
-            J_j_c,
-            self._dt
-        )
+            body_vel, lambda_j, self._body_trans, self._J_j_p, self._J_j_c, dt
+        )  # [5D, 1]
 
-        res = self.flatten_residuals(res_dynamics, res_contact, res_friction, res_joint)
-
-        return res
+        return res_dynamics, res_contact, res_friction, res_joint
 
     def compute_jacobian(
         self,
-        x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
-    ) -> Float[torch.Tensor, "B(6 + 4C) + 5D B(6 + 4C) + 5D"]:
-        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x)
+        body_vel: Float[torch.Tensor, "B 6 1"],
+        lambda_n: Float[torch.Tensor, "B C 1"],
+        lambda_t: Float[torch.Tensor, "B 2C 1"],
+        gamma: Float[torch.Tensor, "B C 1"],
+        lambda_j: Float[torch.Tensor, "5D 1"],
+        dt: float,
+    ) -> torch.Tensor:
+        """
+        Computes the Jacobian matrix for the residuals.
 
-        B = self.model.body_count  # Body count
-        C = self.model.max_contacts_per_body  # Max contacts per body
-        D = self.model.joint_count  # Joint count
+        Args:
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+            dt: Time step.
+
+        Returns:
+            Sparse COO Jacobian matrix [B(6 + 4C) + 5D, B(6 + 4C) + 5D].
+        """
+        B = body_vel.shape[0]  # Number of bodies
+        C = lambda_n.shape[1]  # Max contacts per body
+        D = self.model.joint_parent.shape[0]  # Joint count
         total_dim_batched = 6 + 4 * C  # Per-body variables
         full_size = (
             B * total_dim_batched + 5 * D
@@ -330,7 +342,7 @@ class NonSmoothNewtonEngine:
             self._penetration_depth,
             self._contact_mask,
             self.model.restitution,
-            self._dt,
+            dt,
         )  # Shapes: [B, C, 6], [B, C, C]
 
         dres_t_dbody_vel, dres_t_dlambda_n, dres_t_dlambda_t, dres_t_dgamma = (
@@ -346,7 +358,7 @@ class NonSmoothNewtonEngine:
         )  # Shapes: [B, 3C, 6], [B, 3C, C], [B, 3C, 2C], [B, 3C, C]
 
         dres_j_dbody_vel = self.revolute_constraint.get_derivatives(
-            body_vel, self._body_trans, self._J_j_p, self._J_j_c, self._dt
+            body_vel, self._body_trans, self._J_j_p, self._J_j_c, dt
         )  # Shapes: [5D, 6]
 
         # Lists to collect indices and values
@@ -461,17 +473,39 @@ class NonSmoothNewtonEngine:
 
     def compute_numerical_jacobian(
         self,
-        x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
+        body_vel: Float[torch.Tensor, "B 6 1"],
+        lambda_n: Float[torch.Tensor, "B C 1"],
+        lambda_t: Float[torch.Tensor, "B 2C 1"],
+        gamma: Float[torch.Tensor, "B C 1"],
+        lambda_j: Float[torch.Tensor, "5D 1"],
+        dt: float,
         eps: float = 1e-6,
     ) -> Float[torch.Tensor, "B(6 + 4C) + 5D B(6 + 4C) + 5D"]:
+        """
+        Computes the numerical Jacobian using finite differences.
+
+        Args:
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+            dt: Time step.
+            eps: Perturbation size for finite differences.
+
+        Returns:
+            Numerical Jacobian matrix [B(6 + 4C) + 5D, B(6 + 4C) + 5D].
+        """
+
         B = self.model.body_count  # Body count
         C = self.model.max_contacts_per_body  # Max contacts per body
-        D = self.model.joint_count  # Joint count
+        D = self.model.joint_parent.shape[0]  # Joint count
         total_dim_batched = 6 + 4 * C  # Body velocities + contact variables
         full_size = B * total_dim_batched + 5 * D  # Total variables including joints
 
         # Flatten the variables into a single vector
-        F_x = self.residual(x)
+        x = self.flatten_variables(body_vel, lambda_n, lambda_t, gamma, lambda_j)
+        F_x = self.compute_F_x(body_vel, lambda_n, lambda_t, gamma, lambda_j, dt)
 
         # Initialize numerical Jacobian
         J_num = torch.zeros((full_size, full_size), device=self.device)
@@ -480,14 +514,19 @@ class NonSmoothNewtonEngine:
         for i in range(full_size):
             x_plus = x.clone()
             x_plus[i, 0] += eps  # Perturb the i-th variable
-            F_x_plus = self.residual(x_plus)
+            body_vel_p, lambda_n_p, lambda_t_p, gamma_p, lambda_j_p = (
+                self.unflatten_variables(x_plus)
+            )
+            F_x_plus = self.compute_F_x(
+                body_vel_p, lambda_n_p, lambda_t_p, gamma_p, lambda_j_p, dt
+            )
             J_num[:, i] = (F_x_plus - F_x).squeeze() / eps
 
         return J_num
 
     def visualize_jacobian_comparison(
         self,
-        J_ana: Float[torch.Tensor, "B(6 + 4C) + 5D B(6 + 4C) + 5D"],
+        J_ana: torch.Tensor,
         J_num: Float[torch.Tensor, "B(6 + 4C) + 5D B(6 + 4C) + 5D"],
         iteration: int,
     ) -> None:
@@ -556,20 +595,52 @@ class NonSmoothNewtonEngine:
 
     def perform_newton_step_line_search(
         self,
+        J_F: torch.Tensor,
         F_x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
-        J_F: Float[torch.Tensor, "B(6 + 4C) + 5D B(6 + 4C) + 5D"],
-        x: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
+        body_vel: Float[torch.Tensor, "B 6 1"],
+        lambda_n: Float[torch.Tensor, "B C 1"],
+        lambda_t: Float[torch.Tensor, "B 2C 1"],
+        gamma: Float[torch.Tensor, "B C 1"],
+        lambda_j: Float[torch.Tensor, "5D 1"],
+        dt: float,
     ) -> Tuple[
         Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
-        Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
+        Float[torch.Tensor, "B 6 1"],
+        Float[torch.Tensor, "B C 1"],
+        Float[torch.Tensor, "B 2C 1"],
+        Float[torch.Tensor, "B C 1"],
+        Float[torch.Tensor, "5D 1"],
     ]:
-        B = self.model.body_count  # Body count
-        C = self.model.max_contacts_per_body  # Max contacts per body
-        D = self.model.joint_count  # Joint count
+        """
+        Performs a Newton step with line search to update variables.
+
+        Args:
+            J_F: Sparse COO Jacobian matrix [B(6 + 4C) + 5D, B(6 + 4C) + 5D].
+            F_x: Concatenated residuals [B(6 + 4C) + 5D, 1].
+            body_vel: Body velocities [B, 6, 1].
+            lambda_n: Normal impulses [B, C, 1].
+            lambda_t: Tangential impulses [B, 2C, 1].
+            gamma: Friction auxiliary variables [B, C, 1].
+            lambda_j: Joint impulses [5D, 1].
+            dt: Time step.
+
+        Returns:
+            Tuple of updated residuals, body velocities, normal impulses,
+            tangential impulses, gamma, and joint impulses.
+        """
+        B = body_vel.shape[0]  # Number of bodies
+        C = lambda_n.shape[1]  # Max contacts per body
+        D = (
+            self.model.joint_parent.shape[0]
+            if self.model.joint_parent is not None
+            else 0
+        )  # Number of joints
         total_dim_batched = 6 + 4 * C  # Per-body variables
         full_size = (
             B * total_dim_batched + 5 * D
         )  # Total size including unbatched lambda_j
+
+        F_x_flat = F_x.view(full_size, 1)  # [B(6+4C)+5D, 1]
 
         # Regularize the sparse Jacobian
         reg_indices = torch.arange(full_size, device=self.device)  # [full_size]
@@ -583,10 +654,20 @@ class NonSmoothNewtonEngine:
         J_F_reg = J_F + reg_matrix
 
         J_F_reg_dense = J_F_reg.to_dense()  # [full_size, full_size]
-        delta_x = torch.linalg.solve(J_F_reg_dense, -F_x)  # [full_size, 1]
+        delta_x_flat = torch.linalg.solve(J_F_reg_dense, -F_x_flat)  # [full_size, 1]
 
         # Clamp the detlta_x to avoid huge jumps
-        delta_x = torch.clamp(delta_x, -100.0, 100.0)
+        delta_x_flat = torch.clamp(delta_x_flat, -100.0, 100.0)
+
+        # Split delta_x into batched and unbatched parts
+        delta_x_batched = delta_x_flat[: B * total_dim_batched].view(
+            B, total_dim_batched, 1
+        )  # [B, 6+4C, 1]
+        delta_body_qd = delta_x_batched[:, :6, :]  # [B, 6, 1]
+        delta_lambda_n = delta_x_batched[:, 6 : 6 + C, :]  # [B, C, 1]
+        delta_lambda_t = delta_x_batched[:, 6 + C : 6 + 3 * C, :]  # [B, 2C, 1]
+        delta_gamma = delta_x_batched[:, 6 + 3 * C :, :]  # [B, C, 1]
+        delta_lambda_j = delta_x_flat[B * total_dim_batched :]  # [5D, 1]
 
         norm = torch.sum(F_x**2)  # Scalar
         alpha = 1.0
@@ -594,12 +675,30 @@ class NonSmoothNewtonEngine:
         max_linesearch_iters = 10
 
         for _ in range(max_linesearch_iters):
-            x_trial = x + alpha * delta_x  # [B(6 + 4C) + 5D, 1]
+            body_qd_trial = body_vel + alpha * delta_body_qd  # [B, 6, 1]
+            lambda_n_trial = lambda_n + alpha * delta_lambda_n  # [B, C, 1]
+            lambda_t_trial = lambda_t + alpha * delta_lambda_t  # [B, 2C, 1]
+            gamma_trial = gamma + alpha * delta_gamma  # [B, C, 1]
+            lambda_j_trial = lambda_j + alpha * delta_lambda_j  # [5D, 1]
 
-            F_x_new = self.residual(x_trial)  # [B(6 + 4C) + 5D, 1]
-            norm_new = torch.sum(F_x_new**2)  # Scalar
+            res_d_new, res_n_new, res_t_new, res_j_new = self.compute_residuals(
+                body_qd_trial,
+                lambda_n_trial,
+                lambda_t_trial,
+                gamma_trial,
+                lambda_j_trial,
+                dt,
+            )  # [B, 6, 1], [B, C, 1], [B, 3C, 1], [5D, 1]
+            F_x_new_batched = torch.cat(
+                [res_d_new, res_n_new, res_t_new], dim=1
+            )  # [B, 6+4C, 1]
+            F_x_new = torch.cat(
+                [F_x_new_batched.view(-1, 1), res_j_new], dim=0
+            )  # [B(6+4C)+5D, 1]
+            new_norm = torch.sum(F_x_new**2)  # Scalar
 
-            if norm_new < norm:
+            if new_norm < norm:
+                norm = new_norm
                 F_x = F_x_new
                 break
             alpha /= 2.0
@@ -607,47 +706,13 @@ class NonSmoothNewtonEngine:
                 print("Linesearch failed to reduce residual; using smallest step")
                 break
 
-        new_x = x + alpha * delta_x
+        new_body_qd = body_vel + alpha * delta_body_qd  # [B, 6, 1]
+        new_lambda_n = lambda_n + alpha * delta_lambda_n  # [B, C, 1]
+        new_lambda_t = lambda_t + alpha * delta_lambda_t  # [B, 2C, 1]
+        new_gamma = gamma + alpha * delta_gamma  # [B, C, 1]
+        new_lambda_j = lambda_j + alpha * delta_lambda_j  # [5D, 1]
 
-        return F_x, new_x
-
-    def newton(
-        self,
-        x0: Float[torch.Tensor, "B(6 + 4C) + 5D 1"],
-    ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
-
-        B = self.model.body_count  # Body count
-        C = self.model.max_contacts_per_body
-        D = self.model.joint_count
-        total_dim_batched = 6 + 4 * C
-        full_size = B * total_dim_batched + 5 * D
-
-        x = x0.clone()  # [B(6 + 4C) + 5D, 1]
-        F_x_final = torch.zeros((full_size, 1), device=self.device)
-
-        # Newton iteration loop
-        for i in range(self.iterations):
-            F_x = self.residual(x)
-            J_F = self.compute_jacobian(x)
-
-            # Perform Jacobian check only in the first iteration
-            if self.debug_jacobian and i == 0:
-                J_num = self.compute_numerical_jacobian(x)
-                self.visualize_jacobian_comparison(J_F, J_num, iteration=self._debug_iter)
-
-            F_x_final, x = self.perform_newton_step_line_search(F_x, J_F, x)
-
-            if torch.sum(F_x_final ** 2) < self.tol:
-                break
-
-            self._debug_iter += 1
-
-        if torch.sum(F_x_final ** 2) > 0.1:
-            print(f"Norm : {torch.sum(F_x_final ** 2)}, ({self._debug_iter})")
-
-        self._debug_F_x.append(F_x_final)
-
-        return x
+        return F_x, new_body_qd, new_lambda_n, new_lambda_t, new_gamma, new_lambda_j
 
     def simulate(
         self,
@@ -656,33 +721,134 @@ class NonSmoothNewtonEngine:
         control: Control,
         dt: float,
     ) -> None:
-        B = self.model.body_count  # Number of bodies
-        C = self.model.max_contacts_per_body  # Max contacts per body
-        D = self.model.joint_count  # Joint count
+        """
+        Simulates the system for one time step using the non-smooth Newton method.
 
-        self._compute_attributes(state_in, control, dt)
+        Args:
+            state_in: Input state containing initial body and contact information.
+            state_out: Output state to store updated body and contact information.
+            control: Control inputs for the simulation.
+            dt: Time step.
+        """
+        B = self.model.body_count  # Number of bodies
+        C = state_in.contact_points_per_body.shape[1]  # Max contacts per body
+        D = self.model.joint_parent.shape[0]  # Joint count
+
+        control_body_f = forces_from_joint_actions(state_in.body_q,
+                                                    self.model.joint_parent,
+                                                    self.model.joint_child,
+                                                    self.model.joint_X_p,
+                                                    self.model.joint_X_c,
+                                                    control.joint_act)
+        body_f = state_in.body_f + control_body_f
 
         # Initial integration without contacts
         _, body_vel = self.integrator.integrate(
             body_q=state_in.body_q,
             body_qd=state_in.body_qd,
-            body_f=self._body_force,
+            body_f=body_f,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
             gravity=self.model.g_accel,
-            dt=self._dt,
+            dt=dt,
         )
+
+        self._body_force = body_f # [B, 6, 1]
+        self._body_trans = state_in.body_q.clone()  # [B, 7, 1]
+        self._body_vel_prev = state_in.body_qd.clone() # [B, 6, 1]
+        self._contact_mask = state_in.contact_mask_per_body.clone() # [B, C, 1]
+
+        # Compute normal contact Jacobians
+        self._J_n = self.contact_constraint.compute_contact_jacobians(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_normals_per_body,
+            state_in.contact_mask_per_body,
+        )  # [B, C, 6]
+
+        # Compute tangential contact Jacobians
+        self._J_t = self.friction_constraint.compute_tangential_jacobians(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_normals_per_body,
+            state_in.contact_mask_per_body,
+        )  # [B, 2C, 6]
+
+        # Compute the penetration depth
+        self._penetration_depth = self.contact_constraint.get_penetration_depths(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_points_ground_per_body,
+            state_in.contact_normals_per_body,
+        )  # [B, C, 1]
+
+        self._J_j_p, self._J_j_c = self.revolute_constraint.compute_jacobians(
+            self._body_trans
+        )  # [5D, 6], [5D, 6]
 
         # Initialize variables
         lambda_n = torch.full((B, C, 1), 0.00, device=self.device)  # [B, C, 1]
         lambda_t = torch.full((B, 2 * C, 1), 0.00, device=self.device)  # [B, 2C, 1]
         gamma = torch.full((B, C, 1), 0.00, device=self.device)  # [B, C, 1]
         lambda_j = torch.full((5 * D, 1), 0.00, device=self.device)  # [5D, 1]
+        total_dim_batched = 6 + 4 * C  # Per-body variables
+        F_x_final = torch.zeros(
+            (B * total_dim_batched + 5 * D, 1), device=self.device
+        )  # [B(6+4C)+5D, 1]
 
-        x0 = self.flatten_variables(body_vel, lambda_n, lambda_t, gamma, lambda_j) # [B(6 + 4C) + 5D, 1]
-        x = self.newton(x0)
+        # Newton iteration loop
+        for i in range(self.iterations):
+            res_d, res_n, res_t, res_j = self.compute_residuals(
+                body_vel,
+                lambda_n,
+                lambda_t,
+                gamma,
+                lambda_j,
+                dt,
+            )
 
-        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x)
+            F_x_batched = torch.cat((res_d, res_n, res_t), dim=1)  # [B, 6+4C, 1]
+            F_x = torch.cat((F_x_batched.view(-1, 1), res_j), dim=0)  # [B(6+4C)+5D, 1]
+            J_F = self.compute_jacobian(
+                body_vel,
+                lambda_n,
+                lambda_t,
+                gamma,
+                lambda_j,
+                dt,
+            )
+
+
+            # Perform Jacobian check only in the first iteration
+            if self.debug_jacobian and i == 0:
+                J_num = self.compute_numerical_jacobian(
+                    body_vel, lambda_n, lambda_t, gamma, lambda_j, dt
+                )
+                self.visualize_jacobian_comparison(J_F, J_num, iteration=self._debug_iter)
+
+            F_x_final, body_vel, lambda_n, lambda_t, gamma, lambda_j = (
+                self.perform_newton_step_line_search(
+                    J_F,
+                    F_x,
+                    body_vel,
+                    lambda_n,
+                    lambda_t,
+                    gamma,
+                    lambda_j,
+                    dt,
+                )
+            )
+
+            if torch.sum(F_x_final**2) < self.tol:
+                break
+
+            self._debug_iter += 1
+
+        if torch.sum(F_x_final**2) > 0.1:
+            print(
+                f"Norm : {torch.sum(F_x_final ** 2)}, Time: {state_in.time + dt} ({self._debug_iter})"
+            )
+        self._debug_F_x.append(F_x_final)
 
         state_out.body_qd = body_vel
         state_out.time = state_in.time + dt
@@ -693,83 +859,87 @@ class NonSmoothNewtonEngine:
             state_in.body_q[:, 3:], body_vel[:, :3], dt
         )
 
-    def simulate_xitorch(
-            self,
-            state_in: State,
-            state_out: State,
-            control: Control,
-            dt: float,
-    ) -> None:
-        B = self.model.body_count  # Number of bodies
-        C = self.model.max_contacts_per_body  # Max contacts per body
-        D = self.model.joint_count  # Joint count
+    def simulate_xitorch(self, state_in: State, state_out: State, control: Control, dt: float) -> None:
+        B = self.model.body_count
+        C = state_in.contact_points_per_body.shape[1]
+        D = self.model.joint_parent.shape[0]
 
-        self._compute_attributes(state_in, control, dt)
+        control_body_f = forces_from_joint_actions(state_in.body_q,
+                                                   self.model.joint_parent,
+                                                   self.model.joint_child,
+                                                   self.model.joint_X_p,
+                                                   self.model.joint_X_c,
+                                                   control.joint_act)
+        body_f = state_in.body_f + control_body_f
 
-        # Initial integration without contacts
+        # Initial integration
         _, body_vel = self.integrator.integrate(
             body_q=state_in.body_q,
             body_qd=state_in.body_qd,
-            body_f=self._body_force,
+            body_f=body_f,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
             gravity=self.model.g_accel,
-            dt=self._dt,
+            dt=dt,
         )
 
-        # Initialize variables
-        lambda_n = torch.full((B, C, 1), 0.00, device=self.device)  # [B, C, 1]
-        lambda_t = torch.full((B, 2 * C, 1), 0.00, device=self.device)  # [B, 2C, 1]
-        gamma = torch.full((B, C, 1), 0.00, device=self.device)  # [B, C, 1]
-        lambda_j = torch.full((5 * D, 1), 0.00, device=self.device)  # [5D, 1]
+        self._body_force = body_f # [B, 6, 1]
+        self._body_trans = state_in.body_q.clone()  # [B, 7, 1]
+        self._body_vel_prev = state_in.body_qd.clone() # [B, 6, 1]
+        self._contact_mask = state_in.contact_mask_per_body.clone() # [B, C, 1]
 
-        x0 = self.flatten_variables(body_vel, lambda_n, lambda_t, gamma, lambda_j) # [B(6 + 4C) + 5D, 1]
+        # Compute normal contact Jacobians
+        self._J_n = self.contact_constraint.compute_contact_jacobians(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_normals_per_body,
+            state_in.contact_mask_per_body,
+        )  # [B, C, 6]
 
-        def residual_wrapper(x,
-                             body_trans,
-                             body_vel_prev,
-                             body_force,
-                             J_n,
-                             J_t,
-                             J_j_p,
-                             J_j_c,
-                             penetration_depth,
-                             restitution,
-                             dynamic_friction):
-            return self.residual(x,
-                                body_trans=body_trans,
-                                body_vel_prev=body_vel_prev,
-                                body_force=body_force,
-                                J_n=J_n,
-                                J_t=J_t,
-                                J_j_p=J_j_p,
-                                J_j_c=J_j_c,
-                                penetration_depth=penetration_depth,
-                                restitution=restitution,
-                                dynamic_friction=dynamic_friction,
-                                )
+        # Compute tangential contact Jacobians
+        self._J_t = self.friction_constraint.compute_tangential_jacobians(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_normals_per_body,
+            state_in.contact_mask_per_body,
+        )  # [B, 2C, 6]
 
-        def newton_wrapper(fnc, x0, params, **config):
-            return self.newton(x0)
+        # Compute the penetration depth
+        self._penetration_depth = self.contact_constraint.get_penetration_depths(
+            state_in.body_q,
+            state_in.contact_points_per_body,
+            state_in.contact_points_ground_per_body,
+            state_in.contact_normals_per_body,
+        )  # [B, C, 1]
 
-        x = rootfinder(
-            residual_wrapper,
+        self._J_j_p, self._J_j_c = self.revolute_constraint.compute_jacobians(
+            self._body_trans
+        )  # [5D, 6], [5D, 6]
+
+        # Initial guess
+        lambda_n = torch.zeros((B, C, 1), device=self.device)
+        lambda_t = torch.zeros((B, 2 * C, 1), device=self.device)
+        gamma = torch.zeros((B, C, 1), device=self.device)
+        lambda_j = torch.zeros((5 * D, 1), device=self.device)
+        x0 = self.flatten_variables(body_vel, lambda_n, lambda_t, gamma, lambda_j)
+
+        residual_func = lambda x, y: self.residual(x, y)
+
+        # Solve using rootfinder
+        x_solution = rootfinder(
+            residual_func,
             x0,
-            params=(self._body_trans, self._body_vel_prev, self._body_force,
-                    self._J_n, self._J_t, self._J_j_p, self._J_j_c,
-                    self._penetration_depth, self.model.restitution,
-                    self.model.dynamic_friction),
-            method=newton_wrapper,
-            maxiter=150,
+            params=(dt,),
+            alpha=1e-3,
+            method="broyden1",
+            linesearch="armijo",
+            maxiter=self.iterations,
+            ftol=self.tol,
         )
 
-        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x)
-
+        # Unflatten and update state
+        body_vel, lambda_n, lambda_t, gamma, lambda_j = self.unflatten_variables(x_solution)
         state_out.body_qd = body_vel
         state_out.time = state_in.time + dt
-
-        # Semi-implicit Euler integration
         state_out.body_q[:, :3] = state_in.body_q[:, :3] + body_vel[:, 3:] * dt
-        state_out.body_q[:, 3:] = integrate_quat_exact_batch(
-            state_in.body_q[:, 3:], body_vel[:, :3], dt
-        )
+        state_out.body_q[:, 3:] = integrate_quat_exact_batch(state_in.body_q[:, 3:], body_vel[:, :3], dt)
