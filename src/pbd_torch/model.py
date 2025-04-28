@@ -82,10 +82,19 @@ class State:
 
         # Batched contacts per body
         self.contact_mask_per_body: torch.Tensor = None  # [B, C]
+        self.contact_weight_per_body: torch.Tensor = None  # [B, C]
         self.contact_points_per_body: torch.Tensor = None  # [B, C, 3, 1]
         self.contact_normals_per_body: torch.Tensor = None  # [B, C, 3, 1]
         self.contact_point_indices_per_body: torch.Tensor = None  # [B, C]
         self.contact_points_ground_per_body: torch.Tensor = None  # [B, C, 3, 1]
+
+        # Batched contacts per body for friction
+        self.contact_mask_per_body_friction: torch.Tensor = None  # [B, C]
+        self.contact_weight_per_body_friction: torch.Tensor = None  # [B, C]
+        self.contact_points_per_body_friction: torch.Tensor = None  # [B, C, 3, 1]
+        self.contact_normals_per_body_friction: torch.Tensor = None  # [B, C, 3, 1]
+        self.contact_point_indices_per_body_friction: torch.Tensor = None  # [B, C]
+        self.contact_points_ground_per_body_friction: torch.Tensor = None  # [B, C, 3, 1]
 
         # Flat contacts
         self.contact_count: int = 0  # Total number of contacts (P)
@@ -489,6 +498,8 @@ class Model:
         act: float = 0.0,
         parent_trans: torch.Tensor = TRANSFORM_IDENTITY,
         child_trans: torch.Tensor = TRANSFORM_IDENTITY,
+        ke: float = 0.0,
+        kd: float = 0.0,
         compliance: float = 0.0,
     ) -> int:
         assert parent >= -1 and parent < self.body_count, "Parent index out of bounds"
@@ -533,8 +544,10 @@ class Model:
         )
 
         # Set default stiffness and damping
-        self.joint_ke = torch.cat([self.joint_ke, torch.zeros((1, 1), device=self.device)])
-        self.joint_kd = torch.cat([self.joint_kd, torch.zeros((1, 1), device=self.device)])
+        joint_ke = torch.tensor([ke], device=self.device).view(1, 1)
+        self.joint_ke = torch.cat([self.joint_ke, joint_ke])
+        joint_kd = torch.tensor([kd], device=self.device).view(1, 1)
+        self.joint_kd = torch.cat([self.joint_kd, joint_kd])
 
         return self.joint_count - 1
 

@@ -17,7 +17,7 @@ from pbd_torch.model import State
 from xitorch.optimize import rootfinder
 from pbd_torch.transform import transform_multiply_batch
 from pbd_torch.transform import rotate_vectors_batch
-from pbd_torch.utils import forces_from_joint_actions
+from pbd_torch.utils import forces_from_joint_acts
 
 
 class NonSmoothNewtonEngine:
@@ -734,12 +734,12 @@ class NonSmoothNewtonEngine:
         C = state_in.contact_points_per_body.shape[1]  # Max contacts per body
         D = self.model.joint_parent.shape[0]  # Joint count
 
-        control_body_f = forces_from_joint_actions(state_in.body_q,
-                                                    self.model.joint_parent,
-                                                    self.model.joint_child,
-                                                    self.model.joint_X_p,
-                                                    self.model.joint_X_c,
-                                                    control.joint_act)
+        control_body_f = forces_from_joint_acts(state_in.body_q,
+                                                self.model.joint_parent,
+                                                self.model.joint_child,
+                                                self.model.joint_X_p,
+                                                self.model.joint_X_c,
+                                                control.joint_act)
         body_f = state_in.body_f + control_body_f
 
         # Initial integration without contacts
@@ -864,12 +864,12 @@ class NonSmoothNewtonEngine:
         C = state_in.contact_points_per_body.shape[1]
         D = self.model.joint_parent.shape[0]
 
-        control_body_f = forces_from_joint_actions(state_in.body_q,
-                                                   self.model.joint_parent,
-                                                   self.model.joint_child,
-                                                   self.model.joint_X_p,
-                                                   self.model.joint_X_c,
-                                                   control.joint_act)
+        control_body_f = forces_from_joint_acts(state_in.body_q,
+                                                self.model.joint_parent,
+                                                self.model.joint_child,
+                                                self.model.joint_X_p,
+                                                self.model.joint_X_c,
+                                                control.joint_act)
         body_f = state_in.body_f + control_body_f
 
         # Initial integration

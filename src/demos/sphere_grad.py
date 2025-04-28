@@ -1,5 +1,6 @@
 import os
 
+import matplotlib.pyplot as plt
 import torch
 from demos.utils import save_simulation
 from pbd_torch.collision import collide
@@ -10,233 +11,269 @@ from pbd_torch.model import Vector3
 from pbd_torch.newton_engine import NonSmoothNewtonEngine
 from pbd_torch.terrain import create_terrain_from_exr_file
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
-torch.autograd.set_detect_anomaly(True)
+# Simulation Constants
+MAX_CONTACTS_PER_BODY = 36
+N_COLLISION_POINTS = 2000
+RESTITUTION = 0.8
+DYNAMIC_FRICTION = 0.8
 
-def simulate_sphere():
-    dt = 0.01
-    n_steps = 200
-    device = torch.device("cpu")
-    output_file = os.path.join("simulation", "sphere_grad.json")
+INITIAL_POSITION = Vector3(torch.tensor([-0.5, -0.0, 8.5]))
+INITIAL_VELOCITY = 5.0
+VELOCITY_IDX = 3
+VELOCITIES = torch.linspace(0.0, 10.0, 20)
 
+# Get the current working directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(current_dir, "..", "..", "data")
+experiment_dir = os.path.join(data_dir, "sphere_throw_grad")
+
+# Output File Names
+ANALYTICAL_GRAD_FILE = os.path.join(experiment_dir, "grad_sphere_analytical.pt")
+NUMERICAL_GRAD_FILE = os.path.join(experiment_dir, "grad_sphere_numerical.pt")
+LOSS_FILE = os.path.join(experiment_dir, "loss_sphere.pt")
+VELOCITY_FILE = os.path.join(experiment_dir, "velocity_sphere.pt")
+SIMULATION_FILE = os.path.join(experiment_dir, "simulation_sphere.json")
+
+TERRAIN_FILE = os.path.join(data_dir, "blender", "ground4", "textures", "ant01.002_heightmap.exr")
+PLOT_FILE = os.path.join(experiment_dir, "gradients_and_loss.png")
+
+
+def create_model(device: torch.device) -> tuple[Model, int]:
+    """Create a sphere model with specified parameters."""
     terrain = create_terrain_from_exr_file(
-        heightmap_path="/home/kuceral4/school/diff-pbd/data/blender/ground4/textures/ant01.002_heightmap.exr",
+        heightmap_path=TERRAIN_FILE,
         size_x=40.0,
         size_y=40.0,
         device=device,
     )
 
-    model = Model(max_contacts_per_body=16)
+    model = Model(max_contacts_per_body=MAX_CONTACTS_PER_BODY)
 
-    sphere = model.add_sphere(
+    sphere_idx = model.add_sphere(
         m=1.0,
         radius=1.0,
         name="sphere",
-        pos=Vector3(torch.tensor([-0.5, -1.0, 4.5])),
+        pos=INITIAL_POSITION,
         rot=Quaternion(ROT_IDENTITY),
-        restitution=0.8,
-        dynamic_friction=0.8,
-        n_collision_points=4000,
+        restitution=RESTITUTION,
+        dynamic_friction=DYNAMIC_FRICTION,
+        n_collision_points=N_COLLISION_POINTS,
     )
-
-    target_trans = torch.tensor([[-7.5102e-01],
-                                 [-9.6616e-01],
-                                 [ 3.8366e+00],
-                                 [ 9.9198e-01],
-                                 [-1.6892e-02],
-                                 [-1.2525e-01],
-                                 [ 6.3300e-04]])
+    return model, sphere_idx
 
 
-    model.body_qd[sphere, 3:] = torch.tensor([0.0, 0.0, -0.5]).view(3, 1)
-
+def simulate_sphere(
+    model: Model,
+    sphere_idx: int,
+    dt: float,
+    n_steps: int,
+    device: torch.device,
+) -> torch.Tensor:
+    model.body_qd[sphere_idx, VELOCITY_IDX] = INITIAL_VELOCITY
     engine = NonSmoothNewtonEngine(model, iterations=150)
-
     control = model.control()
     states = [model.state() for _ in range(n_steps)]
 
-    # Simulate the model
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=0.0)
         engine.simulate_xitorch(states[i], states[i + 1], control, dt)
 
-    loss = torch.norm(states[-1].body_q[sphere] - target_trans)
+    target_transform = states[-1].body_q[sphere_idx].clone()
+    print(f"Target transform: {target_transform}")
+    print(f"Saving simulation to {SIMULATION_FILE}")
+    save_simulation(model, states, SIMULATION_FILE)
 
-    print(f"Last transform: {states[-1].body_q[sphere]}")
-    print(f"Loss: {loss.item()}")
+    return target_transform
 
-    print(f"Saving simulation to {output_file}")
-    save_simulation(model, states, output_file)
 
-def compute_gradients():
-    dt = 0.01
-    n_steps = 200
-    device = torch.device("cpu")
-    output_file = os.path.join("simulation", "sphere_grad.json")
-
-    terrain = create_terrain_from_exr_file(
-        heightmap_path="/home/kuceral4/school/diff-pbd/data/blender/ground4/textures/ant01.002_heightmap.exr",
-        size_x=40.0,
-        size_y=40.0,
-        device=device,
-    )
-
-    model = Model(max_contacts_per_body=16)
-
-    sphere = model.add_sphere(
-        m=1.0,
-        radius=1.0,
-        name="sphere",
-        pos=Vector3(torch.tensor([-0.5, -1.0, 4.5])),
-        rot=Quaternion(ROT_IDENTITY),
-        restitution=0.8,
-        dynamic_friction=0.8,
-        n_collision_points=400,
-    )
-
-    target_trans = torch.tensor([[-7.5102e-01],
-        [-9.6616e-01],
-        [ 3.8366e+00],
-        [ 9.9198e-01],
-        [-1.6892e-02],
-        [-1.2525e-01],
-        [ 6.3300e-04]])
-
-    vz = torch.linspace(-1.0, 1.0, 20)
-    grads = get_analytical_dvz(
-        model,
-        sphere,
-        vz,
-        dt,
-        n_steps,
-        target_trans)
-
-    torch.save(vz, "vz.pt")
-
-def get_analytical_dvz(
-        model: Model,
-        sphere: int,
-        vz: torch.Tensor,
-        dt: float,
-        n_steps: int,
-        target_trans: torch.Tensor):
-    grads = []
+def compute_analytical_gradients(
+    model: Model,
+    sphere_idx: int,
+    target_transform: torch.Tensor,
+    velocities: torch.Tensor,
+    dt: float,
+    n_steps: int,
+) -> torch.Tensor:
+    """Compute analytical gradients for sphere velocity."""
+    gradients = []
     losses = []
 
-    for i, _vz in enumerate(vz):
+    for velocity in velocities:
         updated_body_qd = model.body_qd.clone()
-        updated_body_qd[sphere, 5] = _vz
+        updated_body_qd[sphere_idx, VELOCITY_IDX] = velocity
         model.body_qd = updated_body_qd.detach().requires_grad_(True)
 
         engine = NonSmoothNewtonEngine(model, iterations=150)
-
         control = model.control()
         states = [model.state() for _ in range(n_steps)]
 
-        # Simulate the model
         for j in range(n_steps - 1):
             collide(model, states[j], collision_margin=0.0)
             engine.simulate_xitorch(states[j], states[j + 1], control, dt)
 
-        # Compute the loss
-        loss = torch.norm(states[-1].body_q[sphere][2] - target_trans[2])
-
-        # Compute the gradient
+        loss = torch.norm(states[-1].body_q[sphere_idx] - target_transform)
         loss.backward()
+        analytical_gradient = model.body_qd.grad[sphere_idx, 3]
 
-        # Get the gradient of the velocity
-        anal_grad = model.body_qd.grad[sphere, 5]
+        print(
+            f"\nComputing analytical gradient for vx={velocity:.2f}\n"
+            f"\tLoss: {loss.item():.4f}\n"
+            f"\tGradient: {analytical_gradient.item():.4f}"
+        )
 
-        print(f"\nComputing analytical gradient for vz={_vz} \n"
-              f"\tLoss: {loss.item():.4f} \n"
-              f"\tGradient: {anal_grad.item():.4f}")
-
-        grads.append(anal_grad.item())
+        gradients.append(analytical_gradient.item())
         losses.append(loss.item())
         model.body_qd.grad.zero_()
 
-    torch.save(grads, "grad_sphere_analytical.pt")
-    torch.save(losses, "loss_sphere_analytical.pt")
-    return torch.tensor(grads)
+    torch.save(torch.tensor(gradients), ANALYTICAL_GRAD_FILE)
+    torch.save(torch.tensor(losses), LOSS_FILE)
+    return torch.tensor(gradients)
+
 
 @torch.no_grad()
-def get_numerical_dvz(
-        model: Model,
-        sphere: int,
-        vz: torch.Tensor,
-        dt: float,
-        n_steps: int,
-        target_trans: torch.Tensor,
-        epsilon: float = 1e-4):
-    grads = []
+def compute_numerical_gradients(
+    model: Model,
+    sphere_idx: int,
+    target_transform: torch.Tensor,
+    velocities: torch.Tensor,
+    dt: float,
+    n_steps: int,
+    epsilon: float = 1e-4,
+) -> torch.Tensor:
+    """Compute numerical gradients for sphere velocity."""
+    gradients = []
     losses = []
 
-    for i, _vz in enumerate(vz):
-        # Simulate with original velocity
-        model.body_qd[sphere, 5] = _vz
-
+    for velocity in velocities:
         engine = NonSmoothNewtonEngine(model, iterations=150)
-
         control = model.control()
+
+        # Original simulation
         states = [model.state() for _ in range(n_steps)]
+        states[0].body_qd[sphere_idx, VELOCITY_IDX] = velocity
 
         for j in range(n_steps - 1):
             collide(model, states[j], collision_margin=0.0)
             engine.simulate_xitorch(states[j], states[j + 1], control, dt)
 
-        loss_original = torch.norm(states[-1].body_q[sphere, 2] - target_trans[2])
+        loss_original = torch.norm(states[-1].body_q[sphere_idx] - target_transform)
 
-        # Simulate with perturbed velocity
-        model.body_qd[sphere, 5] += epsilon
-
+        # Perturbed simulation
         states_perturbed = [model.state() for _ in range(n_steps)]
+        states_perturbed[0].body_qd[sphere_idx, VELOCITY_IDX] = velocity + epsilon
 
         for j in range(n_steps - 1):
             collide(model, states_perturbed[j], collision_margin=0.0)
-            engine.simulate_xitorch(states_perturbed[j], states_perturbed[j + 1], control, dt)
+            engine.simulate_xitorch(
+                states_perturbed[j], states_perturbed[j + 1], control, dt
+            )
 
-        loss_perturbed = torch.norm(states_perturbed[-1].body_q[sphere, 2] - target_trans[2])
+        loss_perturbed = torch.norm(
+            states_perturbed[-1].body_q[sphere_idx] - target_transform
+        )
+        numerical_gradient = (loss_perturbed - loss_original) / epsilon
 
-        # Numerical gradient
-        numerical_grad = (loss_perturbed - loss_original) / epsilon
+        print(
+            f"\nComputing numerical gradient for vx={velocity:.2f}\n"
+            f"\tOriginal Loss: {loss_original.item():.4f}\n"
+            f"\tPerturbed Loss: {loss_perturbed.item():.4f}\n"
+            f"\tGradient: {numerical_gradient.item():.4f}"
+        )
 
-        print(f"\nComputing numerical gradient for vz={_vz} \n"
-              f"\tOriginal Loss: {loss_original.item()} \n"
-              f"\tPerturbed Loss: {loss_perturbed.item()} \n"
-              f"\tGradient: {numerical_grad.item()}")
-
-        grads.append(numerical_grad.item())
+        gradients.append(numerical_gradient.item())
         losses.append(loss_original.item())
 
-    torch.save(grads, "grad_sphere_numerical.pt")
-    torch.save(losses, "loss_sphere_numerical.pt")
+    torch.save(torch.tensor(gradients), NUMERICAL_GRAD_FILE)
+    torch.save(torch.tensor(losses), LOSS_FILE)
+    return torch.tensor(gradients)
 
-    return torch.tensor(grads)
 
-def visualize_gradients(anal_grad_file="loss_sphere_analytical.pt",
-                        num_grad_file="loss_sphere_numerical.pt",
-                        x_file="vz.pt"):
-    # Load the gradients and velocities
-    anal_grads = torch.load(anal_grad_file)
-    num_grads = torch.load(num_grad_file)
-    x = torch.load(x_file).cpu().numpy()
+def compute_gradients(
+    model: Model,
+    sphere_idx: int,
+    target_transform: torch.Tensor,
+    dt: float,
+    n_steps: int,
+) -> None:
+    """Compute and save both analytical and numerical gradients."""
+    compute_analytical_gradients(
+        model, sphere_idx, target_transform, VELOCITIES, dt, n_steps
+    )
+    compute_numerical_gradients(
+        model, sphere_idx, target_transform, VELOCITIES, dt, n_steps
+    )
+    torch.save(VELOCITIES, VELOCITY_FILE)
 
-    # Create the plot
-    plt.figure(figsize=(10, 6))
-    plt.plot(x, anal_grads, label="Analytical Gradient", marker="o", linestyle="-")
-    plt.plot(x, num_grads, label="Numerical Gradient", marker="x", linestyle="--", alpha=0.7)
-    # Add labels, title, and legend
-    plt.xlabel("Velocity (vz)")
-    plt.ylabel("Gradient")
-    plt.title("Gradient vs Velocity for Sphere")
-    plt.legend()
-    plt.grid()
 
-    # Show the plot
-    plt.show()
+def visualize_gradients(
+    velocity_file: str = VELOCITY_FILE,
+    loss_file: str = LOSS_FILE,
+    analytical_grad_file: str = ANALYTICAL_GRAD_FILE,
+    numerical_grad_file: str = NUMERICAL_GRAD_FILE,
+) -> None:
+    """Visualize loss and gradient data."""
+    velocities = torch.load(velocity_file)
+    loss = torch.load(loss_file)
+    analytical_grad = torch.load(analytical_grad_file)
+    numerical_grad = torch.load(numerical_grad_file)
+
+    fig, (ax_loss, ax_anal_grad, ax_num_grad) = plt.subplots(3, 1, figsize=(6, 8))
+
+    # Plot Loss
+    ax_loss.plot(velocities, loss, label="Loss", color="blue")
+    ax_loss.set_title("Loss over Velocities")
+    ax_loss.set_xlabel("Velocity (vx)")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.legend()
+    ax_loss.grid(True)
+
+    # Plot Analytical Gradients
+    ax_anal_grad.plot(
+        velocities, analytical_grad, label="Analytical Gradient", color="green"
+    )
+    ax_anal_grad.set_title("Analytical Gradient")
+    ax_anal_grad.set_xlabel("Velocity (vx)")
+    ax_anal_grad.set_ylabel("Gradient")
+    ax_anal_grad.legend()
+    ax_anal_grad.grid(True)
+
+    # Plot Numerical Gradients
+    ax_num_grad.plot(
+        velocities, numerical_grad, label="Numerical Gradient", color="red"
+    )
+    ax_num_grad.set_title("Numerical Gradient")
+    ax_num_grad.set_xlabel("Velocity (vx)")
+    ax_num_grad.set_ylabel("Gradient")
+    ax_num_grad.legend()
+    ax_num_grad.grid(True)
+
+    plt.tight_layout()
+    plt.savefig(PLOT_FILE)
+
+
+def main():
+    """Main function to run the sphere simulation and gradient computation."""
+    # Simulation parameters
+    dt = 0.005
+    n_steps = 200
+    device = torch.device("cpu")
+
+    # Initialize model and sphere
+    model, sphere_idx = create_model(device)
+
+    os.makedirs(experiment_dir, exist_ok=True)
+
+    # Run simulation
+    target_transform = simulate_sphere(model, sphere_idx, dt, n_steps, device)
+
+    # Compute gradients
+    compute_gradients(model, sphere_idx, target_transform, dt, n_steps)
+
+    # Visualize results
+    visualize_gradients()
+
 
 if __name__ == "__main__":
-    # simulate_sphere()
-    # compute_gradients()
-    visualize_gradients()
+    main()
+

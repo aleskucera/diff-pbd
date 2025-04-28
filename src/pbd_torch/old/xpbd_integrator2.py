@@ -448,7 +448,7 @@ class XPBDIntegrator:
 
         # ======================================== START: CONTROL ========================================
         debug.section("CONTROL")
-        body_f = body_f + forces_from_joint_actions(
+        body_f = body_f + forces_from_joint_acts(
             body_q,
             model.joint_parent,
             model.joint_child,

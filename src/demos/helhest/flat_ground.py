@@ -11,13 +11,14 @@ from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
 from pbd_torch.model import Vector3
 from pbd_torch.terrain import create_terrain_from_exr_file
+from pbd_torch.xpbd_engine import XPBDEngine
 from tqdm import tqdm
 
 
 def main():
-    dt = 0.01
-    n_steps = 200
-    device = torch.device("cpu")
+    dt = 0.001
+    n_steps = 2000
+    device = torch.device("cuda")
     collision_margin = 0.0
     dynamic_friction_threshold = 0.2
     output_file = os.path.join("simulation", "helhest_flat_ground.json")
@@ -25,7 +26,7 @@ def main():
     model = Model(
         device=device,
         dynamic_friction_threshold=dynamic_friction_threshold,
-        max_contacts_per_body=8,
+        max_contacts_per_body=16,
     )
 
     # Add robot base
@@ -84,7 +85,6 @@ def main():
         dynamic_friction=0.8,
     )
 
-
     # Add left hinge joint
     left_wheel_joint = model.add_hinge_joint(
         parent=base,
@@ -99,7 +99,7 @@ def main():
     right_wheel_joint = model.add_hinge_joint(
         parent=base,
         child=right_wheel,
-        axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
+        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
         name="right_wheel_joint",
         parent_trans=torch.cat((torch.tensor([0.0, -2.5, 0.0]), ROT_90_X)),
         child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
@@ -109,13 +109,14 @@ def main():
     back_wheel_joint = model.add_hinge_joint(
         parent=base,
         child=back_wheel,
-        axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
+        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
         name="back_wheel_joint",
         parent_trans=torch.cat((torch.tensor([-4.0, 0.0, 0.0]), ROT_NEG_90_X)),
         child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     )
 
-    engine = NonSmoothNewtonEngine(model, iterations=100)
+    # engine = NonSmoothNewtonEngine(model, iterations=100, device=device)
+    xpbd_engine = XPBDEngine(model)
 
     # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
@@ -125,10 +126,10 @@ def main():
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=collision_margin)
 
-        control.add_actuation(left_wheel_joint, -50)
-        control.add_actuation(right_wheel_joint, 50)
+        control.add_actuation(left_wheel_joint, 15)
+        control.add_actuation(right_wheel_joint, -15)
 
-        engine.simulate(states[i], states[i + 1], control, dt)
+        xpbd_engine.simulate(states[i], states[i + 1], control, dt)
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

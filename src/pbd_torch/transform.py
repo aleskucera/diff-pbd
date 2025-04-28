@@ -82,10 +82,10 @@ def normalize_quat_batch(q: torch.Tensor) -> torch.Tensor:
     Normalize quaternions to unit length in batch.
 
     Args:
-        q (torch.Tensor): Quaternions, shape [..., 4]
+        q (torch.Tensor): Quaternions, shape [..., 4, 1]
 
     Returns:
-        torch.Tensor: Normalized quaternions, shape [..., 4]
+        torch.Tensor: Normalized quaternions, shape [..., 4, 1]
     """
     q_normalized = q / torch.norm(q, dim=1, keepdim=True)
     return q_normalized
@@ -97,12 +97,12 @@ def quat_inv_batch(q: torch.Tensor) -> torch.Tensor:
     q = [w, x, y, z] -> q* = [w, -x, -y, -z]
 
     Args:
-        q (torch.Tensor): Quaternions, shape [..., 4]
+        q (torch.Tensor): Quaternions, shape [..., 4, 1]
 
     Returns:
-        torch.Tensor: Inverse quaternions, shape [..., 4]
+        torch.Tensor: Inverse quaternions, shape [..., 4, 1]
     """
-    return torch.cat([q[..., :1], -q[..., 1:]], dim=-1).type(q.dtype)
+    return torch.cat([q[:, :1, :], -q[:, 1:, :]], dim=1).type(q.dtype)
 
 
 def rotate_vector(vector: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
@@ -786,7 +786,6 @@ def transform_multiply(
     x = x_a + rotate_vector(x_b, q_a)
 
     return torch.cat([x, q])
-
 
 def transform_multiply_batch(
     transform_a: torch.Tensor, transform_b: torch.Tensor

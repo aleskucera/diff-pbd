@@ -83,20 +83,19 @@ class DynamicsConstraint:
             - torch.matmul(self.mass_matrix, self.g_accel) * dt  # M @ g·dt
         ) # [B, 6, 1]
 
-        if D > 0:
-            joint_impulse = torch.zeros(B, 6, 1, device=self.device) # [B, 6, 1]
+        joint_impulse = torch.zeros(B, 6, 1, device=self.device) # [B, 6, 1]
 
-            # Reshape J_j_p and J_j_c for batch processing
-            lambda_j_batch = lambda_j.view(D, 5, 1)  # [B, D, 1]
+        # Reshape J_j_p and J_j_c for batch processing
+        lambda_j_batch = lambda_j.view(D, 5, 1)  # [B, D, 1]
 
-            impulse_p = torch.matmul(J_j_p.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
-            impulse_c = torch.matmul(J_j_c.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
+        impulse_p = torch.matmul(J_j_p.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
+        impulse_c = torch.matmul(J_j_c.transpose(2, 1), lambda_j_batch)  # [B, 6, 1]
 
-            # Scatter impulses to corresponding bodies
-            joint_impulse.index_add_(0, self.joint_parent, impulse_p) # [B, 6, 1]
-            joint_impulse.index_add_(0, self.joint_child, impulse_c) # [B, 6, 1]
+        # Scatter impulses to corresponding bodies
+        joint_impulse.index_add_(0, self.joint_parent, impulse_p) # [B, 6, 1]
+        joint_impulse.index_add_(0, self.joint_child, impulse_c) # [B, 6, 1]
 
-            res = res - joint_impulse  # [B, 6, 1]
+        res = res - joint_impulse  # [B, 6, 1]
 
         return res
 
@@ -140,32 +139,35 @@ class DynamicsConstraint:
         # ∂res/∂lambda_j
         dres_dlambda_j = torch.zeros(B, 6, 5 * D, device=self.device)  # [B, 6, 5D]
 
-        if D > 0:
-            # Step 1: Reshape and transpose Jacobians
-            J_j_p_reshaped = J_j_p.transpose(1, 2)  # [D, 6, 5]
-            J_j_c_reshaped = J_j_c.transpose(1, 2)  # [D, 6, 5]
+        # Step 1: Reshape and transpose Jacobians
+        J_j_p_reshaped = J_j_p.transpose(1, 2)  # [D, 6, 5]
+        J_j_c_reshaped = J_j_c.transpose(1, 2)  # [D, 6, 5]
 
-            # Step 2: Create block indices for column positions
-            block_indices = (torch.arange(5, device=self.device).view(1, 1, 5) +
-                             5 * torch.arange(D, device=self.device).view(D, 1, 1)).expand(D, 6, 5)  # [D, 6, 5]
+        # Step 2: Create block indices for column positions
+        block_indices = (torch.arange(5, device=self.device).view(1, 1, 5) +
+                         5 * torch.arange(D, device=self.device).view(D, 1, 1)).expand(D, 6, 5)  # [D, 6, 5]
 
-            # Step 3: Create contribution tensors with scatter
-            contrib_p = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_p_reshaped) # [D, 6, 5D]
-            contrib_c = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_c_reshaped) # [D, 6, 5D]
+        # Step 3: Create contribution tensors with scatter
+        contrib_p = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_p_reshaped) # [D, 6, 5D]
+        contrib_c = torch.zeros(D, 6, 5 * D, device=self.device).scatter_(2, block_indices, -J_j_c_reshaped) # [D, 6, 5D]
 
-            # Step 4: Accumulate contributions into dres_dlambda_j
-            dres_dlambda_j.index_add_(0, self.joint_parent, contrib_p) # [B, 6, 5D]
-            dres_dlambda_j.index_add_(0, self.joint_child, contrib_c) # [B, 6, 5D]
+        # Step 4: Accumulate contributions into dres_dlambda_j
+        dres_dlambda_j.index_add_(0, self.joint_parent, contrib_p) # [B, 6, 5D]
+        dres_dlambda_j.index_add_(0, self.joint_child, contrib_c) # [B, 6, 5D]
 
         return dres_dbody_vel, dres_dlambda_n, dres_dlambda_t, dres_dlambda_j
 
 class ContactConstraint:
     def __init__(self,
-        device: torch.device):
+        device: torch.device,
+        fb_alpha: float = 0.3,
+        fb_beta: float = 0.3,
+        fb_epsilon: float = 1e-12,
+        stabilization_factor: float = 0.2):
         self.device = device
 
-        self.stabilization_factor = 0.2
-        self.fb = ScaledFisherBurmeister(alpha=0.3, beta=0.3, epsilon=1e-12)
+        self.stabilization_factor = stabilization_factor
+        self.fb = ScaledFisherBurmeister(alpha=fb_alpha, beta=fb_beta, epsilon=fb_epsilon)
 
     def get_penetration_depths(self,
                                body_trans: Float[torch.Tensor, "B 7 1"],
@@ -238,6 +240,7 @@ class ContactConstraint:
                       J_n: Float[torch.Tensor, "B C 6"],
                       penetration_depth: Float[torch.Tensor, "B C 1"],
                       contact_mask: Bool[torch.Tensor, "B C"],
+                      contact_weight: Float[torch.Tensor, "B C"],
                       restitution: Float[torch.Tensor, "B 1"],
                       dt: float,
                       ) -> Float[torch.Tensor, "B C 1"]:
@@ -251,6 +254,7 @@ class ContactConstraint:
             J_n: Normal contact Jacobians, shape [B, C, 6].
             penetration_depth: Penetration depths, shape [B, C, 1].
             contact_mask: Boolean mask for active contacts, shape [B, C].
+            contact_weight: Contact weights, shape [B, C].
             restitution: Coefficients of restitution, shape [B, 1].
             dt: Time step (scalar).
 
@@ -262,6 +266,7 @@ class ContactConstraint:
 
         active_mask = contact_mask.view(B, C, 1).float() # [B, C, 1]
         inactive_mask = 1 - active_mask # [B, C, 1]
+        weight = contact_weight.view(B, C, 1).float() # [B, C, 1]
 
         v_n = torch.matmul(J_n, body_vel) # [B, C, 6] @ [B, 6, 1] -> [B, C, 1]
         v_n_prev = torch.matmul(J_n, body_vel_prev) # [B, C, 6] @ [B, 6, 1] -> [B, C, 1]
@@ -273,7 +278,7 @@ class ContactConstraint:
         res_act = self.fb.evaluate(lambda_n, v_n + b_err + b_rest) # [B, C, 1]
         res_inact = -lambda_n # [B, C, 1]
 
-        res = active_mask * res_act + inactive_mask * res_inact # [B, C, 1]
+        res = active_mask * res_act * weight + inactive_mask * res_inact # [B, C, 1]
 
         return res # [B, C, 1]
 
@@ -284,6 +289,7 @@ class ContactConstraint:
                         J_n: Float[torch.Tensor, "B C 6"],
                         penetration_depth: Float[torch.Tensor, "B C 1"],
                         contact_mask: Bool[torch.Tensor, "B C"],
+                        contact_weight: Float[torch.Tensor, "B C"],
                         restitution: Float[torch.Tensor, "B 1"],
                         dt: float,
                         ) -> Tuple[Float[torch.Tensor, "B C 6"],
@@ -298,6 +304,7 @@ class ContactConstraint:
             J_n: Normal contact Jacobians, shape [B, C, 6].
             penetration_depth: Penetration depths, shape [B, C, 1].
             contact_mask: Boolean mask for active contacts, shape [B, C].
+            contact_weight: Contact weights, shape [B, C].
             restitution: Coefficients of restitution, shape [B, 1].
             dt: Time step (scalar).
 
@@ -311,6 +318,7 @@ class ContactConstraint:
 
         active_mask = contact_mask.view(B, C, 1).float() # [B, C, 1]
         inactive_mask = 1 - active_mask # [B, C, 1]
+        weight = contact_weight.view(B, C, 1).float() # [B, C, 1]
 
         v_n = torch.matmul(J_n, body_vel) # [B, C, 6] @ [B, 6, 1] -> [B, C, 1]
         v_n_prev = torch.matmul(J_n, body_vel_prev) # [B, C, 6] @ [B, 6, 1] -> [B, C, 1]
@@ -323,8 +331,8 @@ class ContactConstraint:
         da_n_inact = -torch.ones_like(lambda_n) # [B, C, 1]
         db_n_inact = torch.zeros_like(lambda_n) # [B, C, 1]
 
-        da = da_act * active_mask + da_n_inact * inactive_mask # [B, C, 1]
-        db = db_act * active_mask + db_n_inact * inactive_mask # [B, C, 1]
+        da = da_act * weight * active_mask + da_n_inact * inactive_mask  # [B, C, 1]
+        db = db_act * weight * active_mask + db_n_inact * inactive_mask  # [B, C, 1]
 
         # ∂res/∂body_vel
         dres_dbody_vel = db * J_n # [B, C, 1] * [B, C, 6] -> [B, C, 6]
@@ -541,7 +549,7 @@ class FrictionConstraint:
         dres_fr_dbody_vel = torch.cat([dres_fr1_dbody_vel, dres_fr2_dbody_vel], dim=1)  # [B, 2C, 6]
 
         # ∂res_fr / ∂lambda_n
-        dres_fr_dlambda_n = torch.zeros((B, 2 * C, C)) # [B, 2C, C]
+        dres_fr_dlambda_n = torch.zeros((B, 2 * C, C), device=self.device) # [B, 2C, C]
 
         # ∂res_fr / ∂lambda_t
         # For res_fr1 / ∂lambda_t1
@@ -631,7 +639,7 @@ class RevoluteConstraint:
         self.joint_trans_parent = model.joint_X_p
         self.joint_trans_child = model.joint_X_c
         
-        self.device = model.body_q.device
+        self.device = model.device
         
         self.stabilization_factor = 0.2
         self.eps = 1e-10
@@ -849,7 +857,6 @@ class RevoluteConstraint:
 
     def get_residuals(self,
                       body_vel: Float[torch.Tensor, "B 6 1"],
-                      lambda_j: Float[torch.Tensor, "5D 1"],
                       body_trans: Float[torch.Tensor, "B 7 1"],
                       J_j_p: Float[torch.Tensor, "5D 6"],
                       J_j_c: Float[torch.Tensor, "5D 6"],
@@ -860,7 +867,6 @@ class RevoluteConstraint:
 
         Args:
             body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
-            lambda_j: Joint impulses, shape [5D, 1], where D is the number of joints.
             body_trans: Body transforms, shape [B, 7, 1].
             J_j_p: Joint Jacobians for parent bodies, shape [5D, 6].
             J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
@@ -883,26 +889,22 @@ class RevoluteConstraint:
 
         bias = (self.stabilization_factor / dt) * errors  # [D, 5, 1]
 
-        res = self.weight * (v_j_p + v_j_c) + bias  # [D, 5, 1]
+        res = v_j_p + v_j_c + bias  # [D, 5, 1]
 
         return res.view(5 * D, 1)  # [5D, 1]
 
     def get_derivatives(self,
                         body_vel: Float[torch.Tensor, "B 6 1"],
-                        body_trans: Float[torch.Tensor, "B 7 1"],
                         J_j_p: Float[torch.Tensor, "5D 6"],
                         J_j_c: Float[torch.Tensor, "5D 6"],
-                        dt: float
                         ) -> Float[torch.Tensor, "5D 6B"]:
         """
         Compute derivatives of joint residuals w.r.t. body velocities.
 
         Args:
             body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
-            body_trans: Body transforms, shape [B, 7, 1].
             J_j_p: Joint Jacobians for parent bodies, shape [5D, 6], where D is the number of joints.
             J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
-            dt: Time step (scalar).
 
         Returns:
             Derivative ∂res/∂body_vel, shape [5D, 6B].
@@ -925,7 +927,7 @@ class RevoluteConstraint:
         rows = row_indices.repeat_interleave(6)  # [5⋅D⋅6]
 
         # Assign values directly
-        dres_joint_dbody_vel[rows, parent_cols] = self.weight * J_j_p.flatten() # [5D, 6B]
-        dres_joint_dbody_vel[rows, child_cols] = self.weight * J_j_c.flatten() # [5D, 6B]
+        dres_joint_dbody_vel[rows, parent_cols] = J_j_p.flatten() # [5D, 6B]
+        dres_joint_dbody_vel[rows, child_cols] = J_j_c.flatten() # [5D, 6B]
 
         return dres_joint_dbody_vel

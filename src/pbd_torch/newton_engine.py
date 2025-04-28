@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Tuple
 
 import matplotlib.pyplot as plt
@@ -15,7 +16,8 @@ from pbd_torch.model import Control
 from pbd_torch.model import Model
 from pbd_torch.model import State
 from xitorch.optimize import rootfinder
-from pbd_torch.utils import forces_from_joint_actions
+from pbd_torch.utils import forces_from_joint_acts
+
 
 
 class NonSmoothNewtonEngine:
@@ -90,9 +92,8 @@ class NonSmoothNewtonEngine:
         self._J_j_c = torch.zeros((5 * D, 6), device=device)  # [5D, 6]
         self._body_trans = torch.zeros((B, 7, 1), device=device)  # [B, 7, 1]
         self._penetration_depth = torch.zeros((B, C, 1), device=device)  # [B, C, 1]
-        self._contact_mask = torch.zeros(
-            (B, C), device=device, dtype=torch.bool
-        )  # [B, C]
+        self._contact_mask = torch.zeros((B, C), device=device, dtype=torch.bool)  # [B, C]
+        self._contact_weight = torch.zeros((B, C), device=device, dtype=torch.float) # [B, C]
         self._contact_mask_n = torch.zeros((B, C), device=device, dtype=torch.bool)  # [B, C]
         self._contact_mask_t = torch.zeros((B, C), device=device, dtype=torch.bool)  # [B, C]
         self._body_vel_prev = torch.zeros((B, 6, 1), device=device)  # [B, 6, 1]
@@ -103,18 +104,23 @@ class NonSmoothNewtonEngine:
         self._debug_F_x = []
 
     def _compute_attributes(self, state_in: State, control: Control, dt: float) -> None:
-        control_body_f = forces_from_joint_actions(control.joint_act,
-                                                   state_in.body_q,
-                                                   self.model.joint_parent,
-                                                   self.model.joint_child,
-                                                   self.model.joint_X_p,
-                                                   self.model.joint_X_c)
+        control_body_f = forces_from_joint_acts(control.joint_act,
+                                                state_in.joint_q,
+                                                state_in.joint_qd,
+                                                self.model.joint_ke,
+                                                self.model.joint_kd,
+                                                state_in.body_q,
+                                                self.model.joint_parent,
+                                                self.model.joint_child,
+                                                self.model.joint_X_p,
+                                                self.model.joint_X_c)
 
         self._dt = dt
         self._body_force = state_in.body_f + control_body_f  # [B, 6, 1]
         self._body_trans = state_in.body_q.clone()  # [B, 7, 1]
         self._body_vel_prev = state_in.body_qd.clone()  # [B, 6, 1]
-        self._contact_mask = state_in.contact_mask_per_body.clone()  # [B, C, 1]
+        self._contact_mask = state_in.contact_mask_per_body.clone()  # [B, C]
+        self._contact_weight = state_in.contact_weight_per_body.clone()  # [B, C]
 
         # Compute normal contact Jacobians
         self._J_n = self.contact_constraint.compute_contact_jacobians(
@@ -227,6 +233,7 @@ class NonSmoothNewtonEngine:
         J_j_p: Float[torch.Tensor, "5D 6"] = None,
         J_j_c: Float[torch.Tensor, "5D 6"] = None,
         penetration_depth: Float[torch.Tensor, "B C 1"] = None,
+        contact_weight: Float[torch.Tensor, "B C 1"] = None,
         restitution: Float[torch.Tensor, "B C 1"] = None,
         dynamic_friction: Float[torch.Tensor, "B C 1"] = None,
     ) -> Float[torch.Tensor, "B(6 + 4C) + 5D 1"]:
@@ -241,6 +248,7 @@ class NonSmoothNewtonEngine:
         penetration_depth = (
             penetration_depth if penetration_depth is not None else self._penetration_depth
         )
+        contact_weight = contact_weight if contact_weight is not None else self._contact_weight
         restitution = restitution if restitution is not None else self.model.restitution
         dynamic_friction = (
             dynamic_friction if dynamic_friction is not None else self.model.dynamic_friction
@@ -272,6 +280,7 @@ class NonSmoothNewtonEngine:
             J_n,
             penetration_depth,
             self._contact_mask,
+            contact_weight,
             restitution,
             self._dt,
         )
@@ -329,6 +338,7 @@ class NonSmoothNewtonEngine:
             self._J_n,
             self._penetration_depth,
             self._contact_mask,
+            self._contact_weight,
             self.model.restitution,
             self._dt,
         )  # Shapes: [B, C, 6], [B, C, C]
@@ -630,6 +640,12 @@ class NonSmoothNewtonEngine:
             F_x = self.residual(x)
             J_F = self.compute_jacobian(x)
 
+            if self._debug_iter == 100:
+                print(f"Here, {self._debug_iter}")
+                # Save the jacobian and the residual
+                torch.save(J_F.to_dense(), os.path.join(self.debug_folder, f"jacobian_{self._debug_iter}.pt"))
+                torch.save(F_x, os.path.join(self.debug_folder, f"residual_{self._debug_iter}.pt"))
+
             # Perform Jacobian check only in the first iteration
             if self.debug_jacobian and i == 0:
                 J_num = self.compute_numerical_jacobian(x)
@@ -734,6 +750,7 @@ class NonSmoothNewtonEngine:
                              J_j_p,
                              J_j_c,
                              penetration_depth,
+                             contact_weight,
                              restitution,
                              dynamic_friction):
             return self.residual(x,
@@ -745,6 +762,7 @@ class NonSmoothNewtonEngine:
                                 J_j_p=J_j_p,
                                 J_j_c=J_j_c,
                                 penetration_depth=penetration_depth,
+                                contact_weight=contact_weight,
                                 restitution=restitution,
                                 dynamic_friction=dynamic_friction,
                                 )
@@ -757,7 +775,7 @@ class NonSmoothNewtonEngine:
             x0,
             params=(self._body_trans, self._body_vel_prev, self._body_force,
                     self._J_n, self._J_t, self._J_j_p, self._J_j_c,
-                    self._penetration_depth, self.model.restitution,
+                    self._penetration_depth, self._contact_weight, self.model.restitution,
                     self.model.dynamic_friction),
             method=newton_wrapper,
             maxiter=150,
@@ -773,3 +791,5 @@ class NonSmoothNewtonEngine:
         state_out.body_q[:, 3:] = integrate_quat_exact_batch(
             state_in.body_q[:, 3:], body_vel[:, :3], dt
         )
+
+

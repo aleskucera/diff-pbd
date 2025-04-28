@@ -589,7 +589,8 @@ class SemiImplicitEulerIntegrator:
         c = torch.cross(w0, I_w, dim=1)  # [N, 3, 1]
 
         # Angular velocity integration (still in local frame)
-        w1 = w0 + torch.bmm(body_inv_inertia, t0 - c) * dt  # [N, 3, 1]
+        t0_body = rotate_vectors_inverse_batch(t0, q0)  # [N, 3, 1]
+        w1 = w0 + torch.bmm(body_inv_inertia, t0_body - c) * dt  # [N, 3, 1]
 
         # Convert local angular velocities to world frame for quaternion integration
         w1_w = rotate_vectors_batch(w1, q0)  # [N, 3, 1]

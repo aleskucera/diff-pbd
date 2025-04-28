@@ -2,8 +2,8 @@ import os
 
 import torch
 from demos.utils import save_simulation
-from pbd_torch.collision import collide
-from pbd_torch.newton_engine import NonSmoothNewtonEngine
+from pbd_torch.collision import collide, collide_terrain_friction
+from pbd_torch.newton_engine_friction import NonSmoothNewtonEngine
 from pbd_torch.constants import ROT_90_X
 from pbd_torch.constants import ROT_IDENTITY
 from pbd_torch.constants import ROT_NEG_90_X
@@ -15,10 +15,10 @@ from tqdm import tqdm
 
 def main():
     dt = 0.01
-    n_steps = 100
+    n_steps = 300
     device = torch.device("cpu")
     collision_margin = 0.0
-    dynamic_friction_threshold = 0.2
+    friction_collision_margin = 0.08
     output_file = os.path.join("simulation", "helhest_terrain_climb.json")
 
     terrain = create_terrain_from_exr_file(
@@ -31,8 +31,7 @@ def main():
     model = Model(
         terrain=terrain,
         device=device,
-        dynamic_friction_threshold=dynamic_friction_threshold,
-        max_contacts_per_body=8,
+        max_contacts_per_body=16,
     )
 
     # Add robot base
@@ -57,10 +56,10 @@ def main():
         name="left_wheel",
         pos=Vector3(torch.tensor([-8.0, 3.0, 3.0])),
         rot=Quaternion(ROT_NEG_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
+        n_collision_points_base=256,
+        n_collision_points_surface=256,
         restitution=0.1,
-        dynamic_friction=1.0,
+        dynamic_friction=0.8,
     )
 
     # Add right wheel
@@ -71,10 +70,10 @@ def main():
         name="right_wheel",
         pos=Vector3(torch.tensor([-8.0, -3.0, 3.0])),
         rot=Quaternion(ROT_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
+        n_collision_points_base=256,
+        n_collision_points_surface=256,
         restitution=0.1,
-        dynamic_friction=1.0,
+        dynamic_friction=0.8,
     )
 
     # Back wheel
@@ -85,8 +84,8 @@ def main():
         name="back_wheel",
         pos=Vector3(torch.tensor([-12.0, 0.0, 3.0])),
         rot=Quaternion(ROT_NEG_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
+        n_collision_points_base=256,
+        n_collision_points_surface=256,
         restitution=0.1,
         dynamic_friction=0.8,
     )
@@ -100,6 +99,8 @@ def main():
         name="left_wheel_joint",
         parent_trans=torch.cat((torch.tensor([0.0, 2.5, 0.0]), ROT_NEG_90_X)),
         child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
+        ke=50.0,
+        kd=0.5,
     )
 
     # Add right hinge joint
@@ -110,6 +111,8 @@ def main():
         name="right_wheel_joint",
         parent_trans=torch.cat((torch.tensor([0.0, -2.5, 0.0]), ROT_90_X)),
         child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
+        ke=50.0,
+        kd=0.5,
     )
 
     # Add back hinge joint
@@ -120,6 +123,8 @@ def main():
         name="back_wheel_joint",
         parent_trans=torch.cat((torch.tensor([-4.0, 0.0, 0.0]), ROT_NEG_90_X)),
         child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        ke=0.5,
+        kd=0.5,
     )
 
     # Create engine from model
@@ -130,11 +135,12 @@ def main():
 
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=collision_margin)
+        collide_terrain_friction(model, states[i], collision_margin=friction_collision_margin)
 
-        control.add_actuation(left_wheel_joint, 25)
-        control.add_actuation(right_wheel_joint, -25)
+        control.add_actuation(left_wheel_joint, 3)
+        control.add_actuation(right_wheel_joint, -3)
 
-        engine.simulate(states[i], states[i + 1], control, dt)
+        engine.simulate_xitorch(states[i], states[i + 1], control, dt)
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

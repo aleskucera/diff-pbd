@@ -206,8 +206,12 @@ def cylinder_inertia(
     )
 
 
-def forces_from_joint_actions(
+def forces_from_joint_acts(
         joint_act: torch.Tensor,
+        joint_q: torch.Tensor,
+        joint_qd: torch.Tensor,
+        joint_ke: torch.Tensor,
+        joint_kd: torch.Tensor,
         body_trans: torch.Tensor,
         joint_parent: torch.Tensor,
         joint_child: torch.Tensor,
@@ -232,9 +236,16 @@ def forces_from_joint_actions(
     z_p = rotate_vectors_batch(z_axis, X_p[:, 3:]) # [D, 3, 1]
     z_c = rotate_vectors_batch(z_axis, X_c[:, 3:]) # [D, 3, 1]
 
-    # TODO: Resolve the joint actions from joint_axis_mode (now just for forces)
-    torque_p = z_p * joint_act.unsqueeze(1) # [D, 3, 1]
-    torque_c = z_c * joint_act.unsqueeze(1) # [D, 3, 1]
+    joint_force = eval_joint_force(
+        joint_act,
+        joint_q,
+        joint_qd,
+        joint_ke,
+        joint_kd,
+        mode=0) # [D, 1]
+
+    torque_p = z_p * joint_force.unsqueeze(1) # [D, 3, 1]
+    torque_c = z_c * joint_force.unsqueeze(1) # [D, 3, 1]
 
     force_p = torch.zeros((D, 6, 1), dtype=torch.float32, device=device)
     force_p[:, :3] = -torque_p # [D, 3, 1]
@@ -246,3 +257,68 @@ def forces_from_joint_actions(
     body_f.index_add_(0, joint_child, force_c)
 
     return body_f
+
+def eval_joint_force(
+    joint_act: torch.Tensor,
+    joint_q: torch.Tensor,
+    joint_qd: torch.Tensor,
+    ke: torch.Tensor,
+    kd: torch.Tensor,
+    mode: int
+) -> torch.Tensor:
+    """Evaluates joint force based on the joint mode.
+
+    Args:
+        q (float): Joint position
+        qd (float): Joint velocity
+        act (float): Joint actuation
+        ke (float): Position gain
+        kd (float): Velocity gain
+        mode (int): Joint mode (FORCE, TARGET_POSITION, or TARGET_VELOCITY)
+
+    Returns:
+        float: Computed joint force
+    """
+    if mode == 0:
+        return joint_act
+    elif mode == 1:
+        return ke * (joint_act - joint_q) - kd * joint_qd
+    elif mode == 2:
+        return ke * (joint_act - joint_qd)
+    else:
+        raise ValueError("Invalid joint mode")
+
+def swap_quaternion_real_part(
+        transforms: torch.Tensor
+) -> torch.Tensor:
+    """
+    Swaps the real part of the quaternion from the first position to the last
+    within transformation tensors of shape [N, 7, 1].
+
+    Args:
+        transforms: A torch.Tensor of shape [N, 7, 1], where transforms[:, :3, :]
+                    are positions and transforms[:, 3:, :] are quaternions
+                    in [w, x, y, z] format.
+
+    Returns:
+        A torch.Tensor of the same shape [N, 7, 1], with quaternions in
+        [x, y, z, w] format.
+    """
+    if transforms.shape[-1] != 1 or transforms.shape[-2] != 7:
+        raise ValueError("Input tensor must have shape [N, 7, 1]")
+
+    N = transforms.shape[0]
+    device = transforms.device
+    dtype = transforms.dtype
+
+    # Separate position and quaternion
+    positions = transforms[:, :3, :]  # Shape [N, 3, 1]
+    quaternions_wxyz = transforms[:, 3:, :] # Shape [N, 4, 1]
+
+    # Swap quaternion components from [w, x, y, z] to [x, y, z, w]
+    quaternions_xyzw = torch.cat([quaternions_wxyz[:, 1:, :], quaternions_wxyz[:, :1, :]], dim=1) # Shape [N, 4, 1]
+
+    # Concatenate position and the swapped quaternion
+    transformed_tensor = torch.cat([positions, quaternions_xyzw], dim=1) # Shape [N, 7, 1]
+
+    return transformed_tensor
