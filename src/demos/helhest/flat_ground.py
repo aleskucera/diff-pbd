@@ -10,14 +10,13 @@ from pbd_torch.constants import ROT_NEG_90_X
 from pbd_torch.model import Model
 from pbd_torch.model import Quaternion
 from pbd_torch.model import Vector3
-from pbd_torch.terrain import create_terrain_from_exr_file
 from pbd_torch.xpbd_engine import XPBDEngine
 from tqdm import tqdm
 
 
 def main():
     dt = 0.001
-    n_steps = 2000
+    n_steps = 1000
     device = torch.device("cuda")
     collision_margin = 0.0
     dynamic_friction_threshold = 0.2
@@ -115,7 +114,7 @@ def main():
         child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     )
 
-    # engine = NonSmoothNewtonEngine(model, iterations=100, device=device)
+    engine = NonSmoothNewtonEngine(model, iterations=100, device=device)
     xpbd_engine = XPBDEngine(model)
 
     # Set up the initial state

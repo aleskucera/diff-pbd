@@ -18,7 +18,7 @@ os.environ["XLA_FLAGS"] = xla_flags
 
 ball = mjcf.loads(
     """<mujoco>
-       <option timestep="0.005"/>
+       <option timestep="0.01"/>
        <worldbody>
          <body pos="-0.5 0 3.5">
            <joint type="free"/>
@@ -35,7 +35,7 @@ elasticity = 0.35
 ball = ball.replace(elasticity=jnp.array([elasticity] * ball.ngeom))
 
 
-def simulate(vx, n_steps=2000):
+def simulate(vx, n_steps=200):
     """
     Simulate the ball trajectory with given x-velocity.
 
@@ -175,16 +175,15 @@ def gradient_descent(init_vx, target_pos, learning_rate=0.1, num_steps=100):
 
 
 if __name__ == "__main__":
-    # Define target position
-    target_pos = jnp.array([34.56265, 0.0, 0.4999999])
-    # target_pos = jnp.array([4.3353195, 0.0, 0.74065965])
-
     # Initial x-velocity
     init_vx = 5.0
 
     # Simulate with initial x-velocity
     positions, _ = simulate_jit(init_vx)
     plot_trajectory(positions, title="Initial Trajectory")
+
+    target_pos = positions[-1]  # Use the last position as the target for optimization
+    print(f"Target position for optimization: {target_pos}")
 
     # Calculate loss and gradient at the initial point
     initial_loss = compute_loss(init_vx, target_pos)

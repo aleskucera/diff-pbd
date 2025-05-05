@@ -81,8 +81,8 @@ def positional_deltas(
     r_cross_p_a = torch.cross(r_a, p_a, dim=1)  # [B, 3, 1]
     r_cross_p_b = torch.cross(r_b, p_b, dim=1)  # [B, 3, 1]
 
-    w_a = torch.bmm(I_a_inv, r_cross_p_a)  # [B, 3, 1]
-    w_b = torch.bmm(I_b_inv, r_cross_p_b)  # [B, 3, 1]
+    w_a = rotate_vectors_batch(torch.bmm(I_a_inv, r_cross_p_a), q_a)  # [B, 3, 1]
+    w_b = rotate_vectors_batch(torch.bmm(I_b_inv, r_cross_p_b), q_b)  # [B, 3, 1]
 
     # Create quaternion vectors for rotational corrections
     zeros = torch.zeros((batch_size, 1, 1), device=device)
@@ -90,8 +90,8 @@ def positional_deltas(
     w_b_quat = torch.cat([zeros, w_b], dim=1)  # [B, 4, 1]
 
     # Quaternion multiplication
-    dq_a = 0.5 * quat_mul_batch(q_a, w_a_quat)  # [B, 4, 1]
-    dq_b = -0.5 * quat_mul_batch(q_b, w_b_quat)  # [B, 4, 1]
+    dq_a = 0.5 * quat_mul_batch(w_a_quat, q_a)  # [B, 4, 1]
+    dq_b = -0.5 * quat_mul_batch(w_b_quat, q_b)  # [B, 4, 1]
 
     # Combine positional and rotational corrections
     dbody_trans_a = torch.cat([dx_a, dq_a], dim=1)  # [B, 7, 1]
@@ -254,16 +254,12 @@ def ground_restitution_deltas(
     w_prev = body_qd_prev[:, :3]  # Previous angular velocity [C, 3, 1]
 
     # Compute cross products of angular velocity and contact point
-    w_cross_r = torch.cross(w, r, dim=1)  # [C, 3, 1]
-    w_prev_cross_r = torch.cross(w_prev, r, dim=1)  # [C, 3, 1]
-
-    # Rotate to world space
-    w_cross_r_world = rotate_vectors_batch(w_cross_r, q)  # [C, 3, 1]
-    w_prev_cross_r_world = rotate_vectors_batch(w_prev_cross_r, q)  # [C, 3, 1]
+    w_cross_r = torch.cross(w, rotate_vectors_batch(r, q), dim=1)  # [C, 3, 1]
+    w_prev_cross_r = torch.cross(w_prev, rotate_vectors_batch(r, q), dim=1)  # [C, 3, 1]
 
     # Compute the relative velocities
-    v_rel = v + w_cross_r_world  # [C, 3, 1]
-    v_rel_prev = v_prev + w_prev_cross_r_world  # [C, 3, 1]
+    v_rel = v + w_cross_r  # [C, 3, 1]
+    v_rel_prev = v_prev + w_prev_cross_r  # [C, 3, 1]
 
     # Compute normal components of relative velocities
     vn = torch.sum(v_rel * n, dim=1, keepdim=True)  # [C, 1, 1]
@@ -306,7 +302,7 @@ def ground_restitution_deltas(
     dv = J_restitution * m_inv  # [C, 3, 1]
     J_body = rotate_vectors_inverse_batch(J_restitution, q)  # [C, 3, 1]
     r_cross_J = torch.cross(r, J_body, dim=1)  # [C, 3, 1]
-    dw = torch.bmm(I_inv, r_cross_J)  # [C, 3, 1]
+    dw = rotate_vectors_batch(torch.bmm(I_inv, r_cross_J), q)  # [C, 3, 1]
 
     # Combine angular and linear velocity changes
     dbody_qd = torch.cat([dw, dv], dim=1)  # [C, 6, 1]
@@ -341,13 +337,10 @@ def ground_dynamic_friction_deltas(
     w = body_qd[:, :3]  # Angular velocity [batch_size, 3, 1]
 
     # Compute cross products of angular velocity and contact point
-    w_cross_r = torch.cross(w, r, dim=1)  # [batch_size, 3, 1]
-
-    # Rotate to world space
-    w_cross_r_world = rotate_vectors_batch(w_cross_r, q)  # [batch_size, 3, 1]
+    w_cross_r = torch.cross(w, rotate_vectors_batch(r, q), dim=1)  # [batch_size, 3, 1]
 
     # Compute the relative velocities
-    v_rel = v + w_cross_r_world  # [batch_size, 3, 1]
+    v_rel = v + w_cross_r  # [batch_size, 3, 1]
 
     # Compute normal component and project to get tangential component
     vn_components = torch.sum(v_rel * n, dim=1, keepdim=True) * n  # [batch_size, 3, 1]
@@ -394,7 +387,7 @@ def ground_dynamic_friction_deltas(
     dv = J_friction * m_inv  # [batch_size, 3, 1]
     J_body = rotate_vectors_inverse_batch(J_friction, q)  # [batch_size, 3, 1]
     r_cross_J = torch.cross(r, J_body, dim=1)  # [batch_size, 3, 1]
-    dw = torch.bmm(I_inv, r_cross_J)  # [batch_size, 3, 1]
+    dw = rotate_vectors_batch(torch.bmm(I_inv, r_cross_J), q)  # [batch_size, 3, 1]
 
     # Combine angular and linear velocity changes
     dbody_qd = torch.cat([dw, dv], dim=1)  # [batch_size, 6, 1]

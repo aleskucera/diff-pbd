@@ -39,7 +39,7 @@ elasticity = 0.35
 ball = ball.replace(elasticity=jnp.array([elasticity] * ball.ngeom))
 
 
-def simulate(velocity_params, n_steps=1000):
+def simulate(velocity_params, n_steps=400):
     """
     Simulate the ball trajectory with given velocity parameters.
 

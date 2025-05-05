@@ -299,7 +299,6 @@ class NonSmoothNewtonEngine:
         # ---------------- Joint residuals ------------------
         res_joint = self.revolute_constraint.get_residuals(
             body_vel,
-            lambda_j,
             body_trans,
             J_j_p,
             J_j_c,
@@ -356,7 +355,7 @@ class NonSmoothNewtonEngine:
         )  # Shapes: [B, 3C, 6], [B, 3C, C], [B, 3C, 2C], [B, 3C, C]
 
         dres_j_dbody_vel = self.revolute_constraint.get_derivatives(
-            body_vel, self._body_trans, self._J_j_p, self._J_j_c, self._dt
+            body_vel, self._J_j_p, self._J_j_c
         )  # Shapes: [5D, 6]
 
         # Lists to collect indices and values
@@ -640,12 +639,6 @@ class NonSmoothNewtonEngine:
             F_x = self.residual(x)
             J_F = self.compute_jacobian(x)
 
-            if self._debug_iter == 100:
-                print(f"Here, {self._debug_iter}")
-                # Save the jacobian and the residual
-                torch.save(J_F.to_dense(), os.path.join(self.debug_folder, f"jacobian_{self._debug_iter}.pt"))
-                torch.save(F_x, os.path.join(self.debug_folder, f"residual_{self._debug_iter}.pt"))
-
             # Perform Jacobian check only in the first iteration
             if self.debug_jacobian and i == 0:
                 J_num = self.compute_numerical_jacobian(x)
@@ -685,7 +678,7 @@ class NonSmoothNewtonEngine:
             body_f=self._body_force,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
-            gravity=self.model.g_accel,
+            g_accel=self.model.g_accel,
             dt=self._dt,
         )
 
@@ -729,7 +722,7 @@ class NonSmoothNewtonEngine:
             body_f=self._body_force,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
-            gravity=self.model.g_accel,
+            g_accel=self.model.g_accel,
             dt=self._dt,
         )
 

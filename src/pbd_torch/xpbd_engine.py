@@ -44,7 +44,7 @@ def numerical_qd(
     v = (x - x_prev) / dt  # [body_count, 3, 1]
 
     # Compute the angular velocity
-    q_rel = quat_mul_batch(quat_inv_batch(q_prev), q)  # [body_count, 4, 1]
+    q_rel = quat_mul_batch(q, quat_inv_batch(q_prev))  # [body_count, 4, 1]
     w = 2 * q_rel[:, 1:] / dt  # [body_count, 3, 1]
 
     # Flip the omega where the scalar part is negative
@@ -67,7 +67,7 @@ def get_ground_contact_deltas(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Computes position corrections for ground contacts.
 
-    In contacts with ground we assume that the ground is a static body with infinite mass, and
+    In contact with ground, we assume that the ground is a static body with infinite mass, and
     infinite inertia. This simplifies the computation of the contact correction.
 
     Here we compute the position correction and the Lagrange multiplier for the normal force.
@@ -360,7 +360,7 @@ class XPBDEngine:
     def __init__(self, model: Model, iterations: int = 2, device: torch.device = torch.device("cpu")):
         self.iterations = iterations
         self.integrator = SemiImplicitEulerIntegrator(
-            use_local_omega=True, device=device
+            use_local_omega=False, device=device
         )
         self.model = model
 
@@ -381,8 +381,6 @@ class XPBDEngine:
         body_f = state_in.body_f.clone()
 
         # ======================================== START: CONTROL ========================================
-        # self.logger.section("CONTROL")
-        control_time = time.time()
         body_f = body_f + forces_from_joint_acts(
             control.joint_act,
             state_in.joint_q,
@@ -397,11 +395,9 @@ class XPBDEngine:
         )
 
         state_in.body_f = body_f
-        self.logger.print(f"Control time: {time.time() - control_time:.5f}")
         # ======================================== END: CONTROL ========================================
 
         # ======================================== START: INTEGRATION ========================================
-        int_time = time.time()
         body_q, body_qd = self.integrator.integrate(
             body_q,
             body_qd,
@@ -411,21 +407,14 @@ class XPBDEngine:
             self.model.g_accel,
             dt,
         )
-        self.logger.print(f"Integration time: {time.time() - int_time:.5f}")
-
         # ======================================== END: INTEGRATION ========================================
 
         # ======================================== START: POSITION SOLVE ========================================
-        # self.logger.section("POSITION SOLVE")
         n_lambda = torch.zeros((self.model.body_count, 1), device=body_q.device)
         for _ in range(self.iterations):
             pass
 
             # ----------------------------------- START: CONTACT CORRECTION -----------------------------------
-            # self.logger.print("- CONTACT DELTAS:")
-            # self.logger.indent()
-            # self.logger.print("Contact Count:", model.contact_count)
-
             contact_body_q_deltas, lambda_n_deltas = get_ground_contact_deltas(
                 body_q,
                 state_in.contact_count,
@@ -441,8 +430,6 @@ class XPBDEngine:
             body_q[:, 3:] = normalize_quat_batch(body_q[:, 3:])
 
             n_lambda = n_lambda + lambda_n_deltas
-
-            # self.logger.undent()
             # ----------------------------------- END: CONTACT CORRECTION -----------------------------------
 
             # ----------------------------------- START: JOINT CORRECTION -----------------------------------
@@ -460,7 +447,6 @@ class XPBDEngine:
             body_q = body_q + joint_body_q_deltas
             body_q[:, 3:] = normalize_quat_batch(body_q[:, 3:])
 
-            # self.logger.undent()
             # ----------------------------------- END: JOINT CORRECTION -----------------------------------
         # ======================================== END: POSITION SOLVE ========================================
 

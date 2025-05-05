@@ -9,11 +9,13 @@ from pbd_torch.ncp import ScaledFisherBurmeister
 from pbd_torch.constraints import ContactConstraint
 from pbd_torch.utils import swap_quaternion_real_part
 
-# --- Scaled Fisher-Burmeister in Warp ---
-
 @wp.func
 def scaled_fisher_burmeister_evaluate(
-    a: wp.float32, b: wp.float32, alpha: wp.float32, beta: wp.float32, epsilon: wp.float32
+    a: wp.float32,
+    b: wp.float32,
+    alpha: wp.float32,
+    beta: wp.float32,
+    epsilon: wp.float32
 ) -> wp.float32:
     """Warp kernel-side evaluation of the Scaled Fisher-Burmeister function."""
     scaled_a = alpha * a
@@ -23,7 +25,11 @@ def scaled_fisher_burmeister_evaluate(
 
 @wp.func
 def scaled_fisher_burmeister_derivatives(
-    a: wp.float32, b: wp.float32, alpha: wp.float32, beta: wp.float32, epsilon: wp.float32
+    a: wp.float32,
+    b: wp.float32,
+    alpha: wp.float32,
+    beta: wp.float32,
+    epsilon: wp.float32
 ) -> tuple[wp.float32, wp.float32]:
     """Warp kernel-side derivatives of the Scaled Fisher-Burmeister function."""
     scaled_a = alpha * a
@@ -187,12 +193,12 @@ def get_contact_derivatives_kernel(
 
     # Store the derivatives for body_vel (reshaped from [B, C, 6])
     # Apply weight and db (which now handles active/inactive)
-    for j in range(6):
+    for j in range(wp.static(6)):
         # ∂res_bc / ∂body_vel_b_j
         # For active: db_act * J_n_bc_j * weight
         # For inactive: db_inact * J_n_bc_j * weight = 0.0 * J_n_bc_j * weight = 0.0
         # Multiplying (db * J_n[b, c][j]) by weight gives the correct weighted derivative for both cases
-        dres_dbody_vel[b, c, j] = db * J_n[b, c][j]
+        dres_dbody_vel[b, c, wp.static(j)] = db * J_n[b, c][wp.static(j)]
 
     # Store the diagonal terms of ∂res/∂lambda_n
     # If active: da_act * weight

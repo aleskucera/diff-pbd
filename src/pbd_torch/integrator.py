@@ -196,7 +196,6 @@ def integrate_quat_approx_local_omega_batch(
 
 # -------------------- Start: Discretized Angle Integration --------------------
 
-
 def compute_H(q: torch.Tensor) -> torch.Tensor:
     """
     Compute the H matrix for global (world frame) angular velocity for batched quaternions.
@@ -334,7 +333,56 @@ def integrate_quat_discretized_local_omega_batch(
 
 
 # -------------------- End: Discretized Angle Integration --------------------
+from jaxtyping import Float
+def integrate_bodies(
+        self,
+        body_q: Float[torch.Tensor, "B 7 1"],
+        body_qd: Float[torch.Tensor, "B 6 1"],
+        body_f: Float[torch.Tensor, "B 6 1"],
+        body_inv_mass: Float[torch.Tensor, "B 1 1"],
+        body_inv_inertia: Float[torch.Tensor, "B 3 3"],
+        g_accel: Float[torch.Tensor, "3 1"],
+        dt: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Integrates all bodies with angular velocities in world frame."""
 
+    # Extract components
+    x0 = body_q[:, :3]  # Positions [N, 3, 1]
+    q0 = body_q[:, 3:]  # Rotations [N, 4, 1]
+    v0 = body_qd[:, 3:]  # Linear velocities [N, 3, 1]
+    w0 = body_qd[:, :3]  # Angular velocities [N, 3, 1]
+    t0 = body_f[:, :3]  # Torques [N, 3, 1]
+    f0 = body_f[:, 3:]  # Linear forces [N, 3, 1]
+
+    # Transform world angular velocities to body frame
+    w0_body = rotate_vectors_inverse_batch(w0, q0)  # [N, 3, 1]
+    t0_body = rotate_vectors_inverse_batch(t0, q0)  # [N, 3, 1]
+
+    # Compute Coriolis terms in body frame
+    I_w = torch.bmm(body_inv_inertia, w0_body)  # [N, 3, 1]
+    c = torch.cross(w0_body, I_w, dim=1)  # [N, 3, 1]
+
+    # Compute angular acceleration in body frame
+    alpha_body = torch.bmm(body_inv_inertia, (t0_body - c))  # [N, 3, 1]
+
+    # Transform angular acceleration back to world frame
+    alpha_world = rotate_vectors_batch(alpha_body, q0)  # [N, 3, 1]
+
+    # Integrate linear motion
+    v1 = v0 + (f0 * body_inv_mass + g_accel[3:]) * dt  # [N, 3, 1]
+    x1 = x0 + v1 * dt  # [N, 3, 1]
+
+    # Integrate angular velocity in world frame
+    w1 = w0 + alpha_world * dt  # [N, 3, 1]
+
+    # Exact_integration of quaternions
+    q1 = integrate_quat_exact_batch(q0, w1, dt)  # [N, 4, 1]
+
+    # Assemble final states
+    new_body_q = torch.cat([x1, q1], dim=1)  # [N, 7, 1]
+    new_body_qd = torch.cat([w1, v1], dim=1)  # [N, 6, 1]
+
+    return new_body_q, new_body_qd
 
 class SemiImplicitEulerIntegrator:
     def __init__(self, use_local_omega: bool = False, device=None):
@@ -390,7 +438,7 @@ class SemiImplicitEulerIntegrator:
         body_f: torch.Tensor,
         body_inv_mass: torch.Tensor,
         body_inv_inertia: torch.Tensor,
-        gravity: torch.Tensor,
+        g_accel: torch.Tensor,
         dt: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -402,7 +450,7 @@ class SemiImplicitEulerIntegrator:
             body_f: Batch of forces and torques [N, 6]
             body_inv_mass: Batch of inverse masses [N]
             body_inv_inertia: Batch of inverse inertia tensors [N, 3, 3]
-            gravity: Gravity vector [3]
+            g_accel: Gravity vector [3]
             dt: Time step
 
         Returns:
@@ -410,11 +458,11 @@ class SemiImplicitEulerIntegrator:
         """
         if self.use_local_omega:
             return self._integrate_bodies_local_omega_batch(
-                body_q, body_qd, body_f, body_inv_mass, body_inv_inertia, gravity, dt
+                body_q, body_qd, body_f, body_inv_mass, body_inv_inertia, g_accel, dt
             )
         else:
             return self._integrate_bodies_global_omega_batch(
-                body_q, body_qd, body_f, body_inv_mass, body_inv_inertia, gravity, dt
+                body_q, body_qd, body_f, body_inv_mass, body_inv_inertia, g_accel, dt
             )
 
     def _integrate_body_global_omega(
@@ -475,7 +523,7 @@ class SemiImplicitEulerIntegrator:
         body_f: torch.Tensor,
         body_inv_mass: torch.Tensor,
         body_inv_inertia: torch.Tensor,
-        gravity: torch.Tensor,
+        g_accel: torch.Tensor,
         dt: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Integrates all bodies with angular velocities in world frame."""
@@ -484,25 +532,26 @@ class SemiImplicitEulerIntegrator:
         x0 = body_q[:, :3]  # Positions [N, 3, 1]
         q0 = body_q[:, 3:]  # Rotations [N, 4, 1]
         v0 = body_qd[:, 3:]  # Linear velocities [N, 3, 1]
-        w0 = body_qd[:, :3]  # Angular velocities (world frame) [N, 3, 1]
-        t0 = body_f[:, :3]  # Torques (body frame) [N, 3, 1]
+        w0 = body_qd[:, :3]  # Angular velocities [N, 3, 1]
+        t0 = body_f[:, :3]  # Torques [N, 3, 1]
         f0 = body_f[:, 3:]  # Linear forces [N, 3, 1]
 
         # Transform world angular velocities to body frame
         w0_body = rotate_vectors_inverse_batch(w0, q0)  # [N, 3, 1]
+        t0_body = rotate_vectors_inverse_batch(t0, q0)  # [N, 3, 1]
 
         # Compute Coriolis terms in body frame
         I_w = torch.bmm(body_inv_inertia, w0_body)  # [N, 3, 1]
         c = torch.cross(w0_body, I_w, dim=1)  # [N, 3, 1]
 
         # Compute angular acceleration in body frame
-        alpha_body = torch.bmm(body_inv_inertia, (t0 - c))  # [N, 3, 1]
+        alpha_body = torch.bmm(body_inv_inertia, (t0_body - c))  # [N, 3, 1]
 
         # Transform angular acceleration back to world frame
         alpha_world = rotate_vectors_batch(alpha_body, q0)  # [N, 3, 1]
 
         # Integrate linear motion
-        v1 = v0 + (f0 * body_inv_mass + gravity[3:]) * dt  # [N, 3, 1]
+        v1 = v0 + (f0 * body_inv_mass + g_accel[3:]) * dt  # [N, 3, 1]
         x1 = x0 + v1 * dt  # [N, 3, 1]
 
         # Integrate angular velocity in world frame
@@ -568,7 +617,7 @@ class SemiImplicitEulerIntegrator:
         body_f: torch.Tensor,
         body_inv_mass: torch.Tensor,
         body_inv_inertia: torch.Tensor,
-        gravity: torch.Tensor,
+        g_accel: torch.Tensor,
         dt: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Integrates all bodies with angular velocities in local/body frame."""
@@ -581,7 +630,7 @@ class SemiImplicitEulerIntegrator:
         f0 = body_f[:, 3:]  # Linear forces [N, 3, 1]
 
         # Integrate linear velocity and position for all bodies
-        v1 = v0 + (f0 * body_inv_mass + gravity[3:]) * dt  # [N, 3, 1]
+        v1 = v0 + (f0 * body_inv_mass + g_accel) * dt  # [N, 3, 1]
         x1 = x0 + v1 * dt  # [N, 3, 1]
 
         # Coriolis force and angular velocity integration in local frame
