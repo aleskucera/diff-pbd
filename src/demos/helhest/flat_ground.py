@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 def main():
     dt = 0.001
-    n_steps = 1000
+    n_steps = 5000
     device = torch.device("cuda")
     collision_margin = 0.0
     dynamic_friction_threshold = 0.2

@@ -4,10 +4,9 @@ from typing import Tuple
 
 import torch
 from pbd_torch.constants import TRANSFORM_IDENTITY
-from pbd_torch.correction import ground_dynamic_friction_deltas
-from pbd_torch.correction import ground_restitution_deltas
 from pbd_torch.correction import joint_deltas
 from pbd_torch.correction import positional_deltas
+from pbd_torch.correction import velocity_deltas
 from pbd_torch.integrator import SemiImplicitEulerIntegrator
 from pbd_torch.logger import DebugLogger
 from pbd_torch.model import Control
@@ -229,75 +228,10 @@ def normalize_values(
     return values / (normalization_factor + epsilon)
 
 
-def get_dynamic_friction_deltas(
-    body_q: torch.Tensor,
-    body_qd: torch.Tensor,
-    contact_count: int,
-    contact_body: torch.Tensor,
-    contact_point: torch.Tensor,
-    contact_normal: torch.Tensor,
-    contact_point_ground: torch.Tensor,
-    body_inv_mass: torch.Tensor,
-    body_inv_inertia: torch.Tensor,
-    dynamic_friction: torch.Tensor,
-    lambda_n: torch.Tensor,
-    gap_threshold: float,
-    dt: float,
-) -> torch.Tensor:
-    """Computes velocity corrections for dynamic friction using batch operations."""
-    device = body_q.device
-    body_count = body_q.shape[0]
-
-    # Initialize output
-    body_deltas = torch.zeros((body_count, 6, 1), device=device)
-
-    # Get body states for all contacts
-    contact_body_q = body_q[contact_body]  # [C, 7, 1]
-    contact_body_qd = body_qd[contact_body]  # [C, 6, 1]
-
-    # Get the contact points in world space
-    p_a = transform_points_batch(contact_point, contact_body_q)  # [C, 3, 1]
-    p_b = contact_point_ground  # [C, 3, 1]
-
-    # Create mask for valid contacts (where contact_point is below the threshold)
-    gap = gap_function(p_a, p_b, contact_normal)  # [C]
-    valid_mask = (gap < gap_threshold)  # [C]
-    valid_body_idxs = contact_body[valid_mask]  # [valid_contact_count]
-
-    # Apply batched dynamic friction calculation
-    dbody_qd_batch = ground_dynamic_friction_deltas(
-        body_q=contact_body_q[valid_mask].view(-1, 7, 1),
-        body_qd=contact_body_qd[valid_mask].view(-1, 6, 1),
-        r=contact_point[valid_mask].view(-1, 3, 1),
-        n=contact_normal[valid_mask].view(-1, 3, 1),
-        m_inv=body_inv_mass[valid_body_idxs].view(-1, 1, 1),
-        I_inv=body_inv_inertia[valid_body_idxs].view(-1, 3, 3),
-        dynamic_friction=dynamic_friction[valid_body_idxs].view(-1, 1),
-        lambda_n=lambda_n[valid_body_idxs].view(-1, 1),
-        dt=dt,
-    ) # [valid_contact_count, 6, 1]
-
-    # Compute how many corrections we have per body
-    num_corrections = torch.bincount(
-        valid_body_idxs, minlength=body_count
-    )  # [B]
-
-    # Add the deltas to the body_deltas
-    body_deltas = body_deltas.scatter_add(
-        0, valid_body_idxs.view(-1, 1, 1).expand_as(dbody_qd_batch), dbody_qd_batch
-    ) # [B, 6, 1]
-
-    # Normalize the deltas by the number of corrections
-    body_deltas = normalize_values(body_deltas, num_corrections.view(-1, 1, 1)) # [B, 6, 1]
-
-    return body_deltas
-
-
-def get_restitution_deltas(
+def get_velocity_deltas(
     body_q: torch.Tensor,
     body_qd: torch.Tensor,
     body_qd_prev: torch.Tensor,
-    contact_count: int,
     contact_body: torch.Tensor,
     contact_point: torch.Tensor,
     contact_normal: torch.Tensor,
@@ -305,8 +239,10 @@ def get_restitution_deltas(
     body_inv_mass: torch.Tensor,
     body_inv_inertia: torch.Tensor,
     restitution: torch.Tensor,
+    dynamic_friction: torch.Tensor,
+    lambda_n: torch.Tensor,
+    dt: float
 ) -> torch.Tensor:
-    """Computes velocity corrections for restitution handling using batch operations."""
     device = body_q.device
     body_count = body_q.shape[0]
 
@@ -328,7 +264,7 @@ def get_restitution_deltas(
     valid_body_idxs = contact_body[valid_mask]  # [valid_contact_count]
 
     # Apply batched restitution calculation
-    dbody_qd_batch = ground_restitution_deltas(
+    dbody_qd = velocity_deltas(
         body_q=contact_body_q[valid_mask].view(-1, 7, 1),
         body_qd=contact_body_qd[valid_mask].view(-1, 6, 1),
         body_qd_prev=contact_body_qd_prev[valid_mask].view(-1, 6, 1),
@@ -337,16 +273,17 @@ def get_restitution_deltas(
         m_inv=body_inv_mass[valid_body_idxs].view(-1, 1, 1),
         I_inv=body_inv_inertia[valid_body_idxs].view(-1, 3, 3),
         restitution=restitution[valid_body_idxs].view(-1, 1),
+        dynamic_friction=dynamic_friction[valid_body_idxs].view(-1, 1),
+        lambda_n=lambda_n[valid_body_idxs].view(-1, 1),
+        dt=dt,
     )
 
     # Compute how many corrections we have per body
-    num_corrections = torch.bincount(
-        valid_body_idxs, minlength=body_count
-    )  # [body_count]
+    num_corrections = torch.bincount(valid_body_idxs, minlength=body_count)  # [body_count]
 
     # Add the deltas to the body_deltas
     body_deltas = body_deltas.scatter_add(
-        0, valid_body_idxs.view(-1, 1, 1).expand_as(dbody_qd_batch), dbody_qd_batch
+        0, valid_body_idxs.view(-1, 1, 1).expand_as(dbody_qd), dbody_qd
     )
 
     # Normalize the deltas by the number of corrections
@@ -411,6 +348,7 @@ class XPBDEngine:
 
         # ======================================== START: POSITION SOLVE ========================================
         n_lambda = torch.zeros((self.model.body_count, 1), device=body_q.device)
+
         for _ in range(self.iterations):
             pass
 
@@ -457,32 +395,10 @@ class XPBDEngine:
         # ======================================== END: VELOCITY UPDATE ========================================
 
         # ======================================== START: VELOCITY SOLVE ========================================
-        # ----------------------------------- START: FRICTION CORRECTION -----------------------------------
-        dynamic_friction_deltas = get_dynamic_friction_deltas(
-            body_q,
-            body_qd,
-            state_in.contact_count,
-            state_in.contact_body_indices_flat,
-            state_in.contact_points_flat,
-            state_in.contact_normals_flat,
-            state_in.contact_points_ground_flat,
-            self.model.body_inv_mass,
-            self.model.body_inv_inertia,
-            self.model.dynamic_friction,
-            n_lambda,
-            self.model.dynamic_friction_threshold,
-            dt,
-        )
-
-        body_qd = body_qd
-        # ----------------------------------- END: FRICTION CORRECTION -----------------------------------
-
-        # ----------------------------------- START: RESTITUTION CORRECTION -----------------------------------
-        restitution_deltas = get_restitution_deltas(
+        velocity_deltas = get_velocity_deltas(
             body_q,
             body_qd,
             state_in.body_qd,
-            state_in.contact_count,
             state_in.contact_body_indices_flat,
             state_in.contact_points_flat,
             state_in.contact_normals_flat,
@@ -490,10 +406,11 @@ class XPBDEngine:
             self.model.body_inv_mass,
             self.model.body_inv_inertia,
             self.model.restitution,
+            self.model.dynamic_friction,
+            n_lambda,
+            dt,
         )
-
-        body_qd = body_qd + restitution_deltas + dynamic_friction_deltas
-        # ----------------------------------- END: RESTITUTION CORRECTION -----------------------------------
+        body_qd = body_qd + velocity_deltas
 
         # ======================================== END: VELOCITY SOLVE ========================================
 
