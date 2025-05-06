@@ -26,9 +26,9 @@ def generalized_inverse_mass(
     return m_inv + angular_component # [batch_size, 1, 1]
 
 def generalized_inverse_angular_mass(
-        body_q: torch.Tensor, # [batch_size, 7, 1]
-        I_inv: torch.Tensor,  # [batch_size, 3, 3]
-        J: torch.Tensor,  # [batch_size, 3, 1]
+    body_q: torch.Tensor, # [batch_size, 7, 1]
+    I_inv: torch.Tensor,  # [batch_size, 3, 3]
+    J: torch.Tensor,  # [batch_size, 3, 1]
 ):
     J_b = rotate_vectors_inverse_batch(J, body_q[:, 3:])  # [batch_size, 3, 1]
     J_b_T = J_b.transpose(2, 1)  # [batch_size, 1, 3]
@@ -89,6 +89,9 @@ def positional_deltas(
     m_b_inv: torch.Tensor,  # [batch_size, 1, 1]
     I_a_inv: torch.Tensor,  # [batch_size, 3, 3]
     I_b_inv: torch.Tensor,  # [batch_size, 3, 3]
+    lambda_: torch.Tensor, # [batch_size, 1, 1]
+    compliance: torch.Tensor, # [batch_size, 1, 1]
+    h: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     c, J = positional_constraint(body_trans_a, body_trans_b, r_a, r_b) # [batch_size, 1, 1], [batch_size, 3, 1]
 
@@ -96,18 +99,20 @@ def positional_deltas(
     weight_b = generalized_inverse_mass(body_trans_b, m_b_inv, I_b_inv, r_b, J)
 
     # Compute the impulse magnitude
-    d_lambda = -c / (weight_a + weight_b) # [batch_size, 1, 1]
+    alpha = compliance / (h ** 2)  # [batch_size, 1, 1]
+    # dlambda = -c / (weight_a + weight_b) # [batch_size, 1, 1]
+    dlambda = -(c + alpha * lambda_) / (weight_a + weight_b + alpha) # [batch_size, 1, 1]
 
     # Compute impulse vectors
-    p = d_lambda * J  # [batch_size, 3, 1]
+    p = dlambda * J  # [batch_size, 3, 1]
 
     # Combine positional and rotational corrections
     dbody_trans_a = positional_deltas_from_impulse(p, body_trans_a, r_a, m_a_inv, I_a_inv) # [batch_size, 7, 1]
     dbody_trans_b = positional_deltas_from_impulse(-p, body_trans_b, r_b, m_b_inv, I_b_inv) # [batch_size, 7, 1]
 
-    return dbody_trans_a, dbody_trans_b, d_lambda
+    return dbody_trans_a, dbody_trans_b, dlambda
 
-def joint_constraint(
+def joint_rot_constraint(
     body_q_p: torch.Tensor,  # [batch_size, 7, 1]
     body_q_c: torch.Tensor,  # [batch_size, 7, 1]
     X_p: torch.Tensor,  # [batch_size, 7, 1]
@@ -145,7 +150,7 @@ def joint_angular_deltas_from_impulse(
 
     return dq
 
-def joint_angular_deltas(
+def joint_rot_deltas(
     body_q_p: torch.Tensor,  # [batch_size, 7, 1]
     body_q_c: torch.Tensor,  # [batch_size, 7, 1]
     X_p: torch.Tensor,  # [batch_size, 7, 1]
@@ -153,8 +158,15 @@ def joint_angular_deltas(
     joint_axis: torch.Tensor,  # [batch_size, 3, 1]
     I_p_inv: torch.Tensor,  # [batch_size, 3, 3]
     I_c_inv: torch.Tensor,  # [batch_size, 3, 3]
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    c, J = joint_constraint(
+    lambda_: torch.Tensor, # [batch_size, 1, 1]
+    compliance: torch.Tensor,   # [batch_size, 1, 1]
+    h: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    dbody_q_p = torch.zeros(body_q_p.shape, device=body_q_p.device)  # [batch_size, 7, 1]
+    dbody_q_c = torch.zeros(body_q_c.shape, device=body_q_c.device)  # [batch_size, 7, 1]
+
+    c, J = joint_rot_constraint(
         body_q_p, body_q_c, X_p, X_c, joint_axis
     )  # [batch_size, 1, 1], [batch_size, 3, 1]
 
@@ -162,13 +174,18 @@ def joint_angular_deltas(
     weight_c = generalized_inverse_angular_mass(body_q_c, I_c_inv, J)  # [batch_size, 1, 1]
     weight = weight_p + weight_c  # [batch_size, 1, 1]
 
-    dlambda = -c / weight # [batch_size, 1, 1]
+    alpha = compliance / (h ** 2)  # [batch_size, 1, 1]
+    # dlambda = -c / weight # [batch_size, 1, 1]
+    dlambda = -(c + alpha * lambda_) / (weight + alpha) # [batch_size, 1, 1]
     p = dlambda * J # [batch_size, 3, 1]
 
     dq_p = joint_angular_deltas_from_impulse(p, body_q_p, I_p_inv)  # [batch_size, 4, 1]
     dq_c = joint_angular_deltas_from_impulse(-p, body_q_c, I_c_inv)  # [batch_size, 4, 1]
 
-    return dq_p, dq_c
+    dbody_q_p[:, 3:] = dq_p  # [batch_size, 7, 1]
+    dbody_q_c[:, 3:] = dq_c  # [batch_size, 7, 1]
+
+    return dbody_q_p, dbody_q_c, dlambda
 
 def joint_deltas(
     body_q_p: torch.Tensor,  # [batch_size, 7, 1]
@@ -180,18 +197,27 @@ def joint_deltas(
     m_c_inv: torch.Tensor,  # [batch_size, 1, 1]
     I_p_inv: torch.Tensor,  # [batch_size, 3, 3]
     I_c_inv: torch.Tensor,  # [batch_size, 3, 3]
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    lambda_pos: torch.Tensor, # [batch_size, 1, 1]
+    lambda_rot: torch.Tensor, # [batch_size, 1, 1]
+    compliance: torch.Tensor, # [batch_size, 1, 1]
+    h: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # Get angular corrections
-    dq_p, dq_c = joint_angular_deltas(
-        body_q_p, body_q_c, X_p, X_c, joint_axis, I_p_inv, I_c_inv
+    dbody_q_p_rot, dbody_q_c_rot, dlambda_rot = joint_rot_deltas(
+        body_q_p=body_q_p,
+        body_q_c=body_q_c,
+        X_p=X_p,
+        X_c=X_c,
+        joint_axis=joint_axis,
+        I_p_inv=I_p_inv,
+        I_c_inv=I_c_inv,
+        lambda_=lambda_rot,
+        compliance=compliance,
+        h=h,
     )
 
-    # Apply angular corrections
-    body_q_p[:, 3:] = normalize_quat_batch(body_q_p[:, 3:] + dq_p)
-    body_q_c[:, 3:] = normalize_quat_batch(body_q_c[:, 3:] + dq_c)
-
     # Get positional corrections
-    dbody_q_p, dbody_q_c, _ = positional_deltas(
+    dbody_q_p_pos, dbody_q_c_pos, dlambda_pos = positional_deltas(
         body_trans_a=body_q_p,
         body_trans_b=body_q_c,
         r_a=X_p[:, :3],
@@ -200,13 +226,16 @@ def joint_deltas(
         m_b_inv=m_c_inv,
         I_a_inv=I_p_inv,
         I_b_inv=I_c_inv,
+        lambda_=lambda_pos,
+        compliance=compliance,
+        h=h,
     )
 
     # Combine angular and positional corrections
-    dbody_q_p[:, 3:] = dbody_q_p[:, 3:] + dq_p
-    dbody_q_c[:, 3:] = dbody_q_c[:, 3:] + dq_c
+    dbody_q_p = dbody_q_p_pos + dbody_q_p_rot
+    dbody_q_c = dbody_q_c_pos + dbody_q_c_rot
 
-    return dbody_q_p, dbody_q_c
+    return dbody_q_p, dbody_q_c, dlambda_pos, dlambda_rot
 
 def velocity_deltas_from_constraint(
         c: torch.Tensor,  # [batch_size, 1, 1]
@@ -247,7 +276,7 @@ def body_point_velocity(
     v_point = v + w_cross_r  # [batch_size, 3, 1]
 
     # Compute normal component and project to get tangential component
-    v_n = torch.matmul(v.transpose(2, 1), v_point)  # [batch_size, 1, 1]
+    v_n = torch.matmul(n.transpose(2, 1), v_point)  # [batch_size, 1, 1]
 
     v_t = v_point - v_n * n  # [batch_size, 3, 1]
     v_t_magnitude = torch.norm(v_t, dim=1, keepdim=True)  # [batch_size, 1, 1]
@@ -266,7 +295,7 @@ def velocity_deltas(
     restitution: torch.Tensor,  # [batch_size, 1]
     dynamic_friction: torch.Tensor,  # [batch_size, 1]
     lambda_n: torch.Tensor,  # [batch_size, 1]
-    dt: float,
+    h: float,
 ):
     device = body_q.device
 
@@ -275,10 +304,10 @@ def velocity_deltas(
     v_n_prev, _, _ = body_point_velocity(body_q, body_qd_prev, r, n)
 
     # ------------------------------ START: RESTITUTION ------------------------------
-    c_restitution = torch.min(- restitution.view(-1, 1, 1) * v_n_prev, torch.zeros_like(v_n))  # [batch_size, 1, 1]
+    c_restitution = v_n + torch.max(restitution * v_n_prev, torch.zeros_like(v_n))  # [batch_size, 1, 1]
 
-    # Apply a threshold to avoid jittering (2 * gravity * dt)
-    jitter_threshold = torch.tensor(2 * 9.81 * dt, device=device)
+    # Apply a threshold to avoid jittering (2 * gravity * h)
+    jitter_threshold = torch.tensor(2 * 9.81 * h, device=device)
     mask = (torch.abs(c_restitution) < jitter_threshold).flatten()  # [batch_size]
     c_restitution[mask] = 0.0  # Set non-masked values to zero
 
@@ -286,7 +315,7 @@ def velocity_deltas(
     # ------------------------------- END: RESTITUTION ------------------------------
 
     # ------------------------------ START: DYNAMIC FRICTION ------------------------------
-    c_friction = torch.min((dynamic_friction * lambda_n).view(-1, 1, 1) / dt, v_t_magnitude)  # [batch_size, 1, 1]
+    c_friction = torch.min(dynamic_friction * torch.abs(lambda_n) / h, v_t_magnitude)  # [batch_size, 1, 1]
 
     dbody_qd_friction = velocity_deltas_from_constraint(c_friction, v_t_direction, body_q, m_inv, I_inv, r) # [batch_size, 6, 1]
     # ------------------------------------ END: DYNAMIC FRICTION ------------------------------

@@ -15,8 +15,8 @@ from tqdm import tqdm
 
 
 def main():
-    dt = 0.001
-    n_steps = 5000
+    dt = 0.01
+    n_steps = 300
     device = torch.device("cuda")
     collision_margin = 0.0
     dynamic_friction_threshold = 0.2
@@ -38,8 +38,8 @@ def main():
         pos=Vector3(torch.tensor([-8.0, 0.0, 3.0])),
         rot=Quaternion(ROT_IDENTITY),
         n_collision_points=500,
-        restitution=0.2,
-        dynamic_friction=0.8,
+        restitution=0.0,
+        dynamic_friction=1.0,
     )
 
     # Add left wheel
@@ -52,7 +52,7 @@ def main():
         rot=Quaternion(ROT_NEG_90_X),
         n_collision_points_base=128,
         n_collision_points_surface=128,
-        restitution=0.1,
+        restitution=0.0,
         dynamic_friction=1.0,
     )
 
@@ -66,7 +66,7 @@ def main():
         rot=Quaternion(ROT_90_X),
         n_collision_points_base=128,
         n_collision_points_surface=128,
-        restitution=0.1,
+        restitution=0.0,
         dynamic_friction=1.0,
     )
 
@@ -80,8 +80,8 @@ def main():
         rot=Quaternion(ROT_NEG_90_X),
         n_collision_points_base=128,
         n_collision_points_surface=128,
-        restitution=0.1,
-        dynamic_friction=0.8,
+        restitution=0.0,
+        dynamic_friction=1.0,
     )
 
     # Add left hinge joint
@@ -114,8 +114,8 @@ def main():
         child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
     )
 
-    engine = NonSmoothNewtonEngine(model, iterations=100, device=device)
-    xpbd_engine = XPBDEngine(model)
+    engine = NonSmoothNewtonEngine(model, iterations=50, device=device)
+    # engine = XPBDEngine(model, pos_iters=5, device=device)
 
     # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
@@ -128,7 +128,7 @@ def main():
         control.add_actuation(left_wheel_joint, 15)
         control.add_actuation(right_wheel_joint, -15)
 
-        xpbd_engine.simulate(states[i], states[i + 1], control, dt)
+        engine.simulate(states[i], states[i + 1], control, dt)
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

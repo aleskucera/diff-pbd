@@ -132,11 +132,11 @@ class State:
             "bodies": [
                 {
                     "name": model.body_name[i],
-                    "transform": [tensor_to_list(self.body_q[i].squeeze(1)), tensor_to_list(self.body_q[i].squeeze(1))], # [B, 7]
-                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1)), tensor_to_list(self.body_qd[i].squeeze(1))], # [B, 6]
-                    "force": [tensor_to_list(self.body_f[i].squeeze(1)), tensor_to_list(self.body_f[i].squeeze(1))], # [B, 6]
-                    "contacts": [tensor_to_list(contacts[i]), tensor_to_list(contacts[i])], # [B, num_contacts] (indices)
-                    "energy": [0.1, 0.1],
+                    "transform": [tensor_to_list(self.body_q[i].squeeze(1))], # [B, 7]
+                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1))], # [B, 6]
+                    "force": [tensor_to_list(self.body_f[i].squeeze(1))], # [B, 6]
+                    "contacts": [tensor_to_list(contacts[i])], # [B, num_contacts] (indices)
+                    "energy": [0.1],
                 }
                 for i in range(self.body_count)
             ],
@@ -574,15 +574,15 @@ class Model:
             return tensor.cpu().tolist() if tensor.numel() > 0 else []
 
         data = {
-            "simBatches": 2,
+            "simBatches": 1,
             "scalarNames": ["energy"],
             "bodies": [
                 {
                     "name": self.body_name[i],
                     "shape": self.body_shapes[i].serialize(),
-                    "transform": [tensor_to_list(self.body_q[i].squeeze(1)), tensor_to_list(self.body_q[i].squeeze(1))], # [batch_size, 7]
-                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1)), tensor_to_list(self.body_qd[i].squeeze(1))], # [batch_size, 6]
-                    "force": [tensor_to_list(self.body_f[i].squeeze(1)), tensor_to_list(self.body_f[i].squeeze(1))], # [batch_size, 3]
+                    "transform": [tensor_to_list(self.body_q[i].squeeze(1))], # [batch_size, 7]
+                    "velocity": [tensor_to_list(self.body_qd[i].squeeze(1))], # [batch_size, 6]
+                    "force": [tensor_to_list(self.body_f[i].squeeze(1))], # [batch_size, 3]
                     "bodyPoints": tensor_to_list(self.body_collision_points.get(i, torch.empty(0))), # [num_points, 3]
                 }
                 for i in range(self.body_count)

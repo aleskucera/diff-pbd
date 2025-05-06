@@ -793,7 +793,6 @@ class NonSmoothNewtonEngine:
             state_in.body_q[:, 3:], body_vel[:, :3], dt
         )
 
-
         # Compute joint_q
         X_p, X_c, _, _ = self.revolute_constraint._get_joint_frames(state_out.body_q)
         q_p = X_p[:, 3:]  # [D, 4, 1]
