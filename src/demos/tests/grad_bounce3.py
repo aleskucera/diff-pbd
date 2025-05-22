@@ -1,9 +1,11 @@
+import time
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from xitorch.optimize import rootfinder
 
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 # Fischer-Burmeister function for complementarity
 def fb(a: torch.Tensor, b: torch.Tensor, epsilon: float = 1e-6) -> torch.Tensor:
@@ -204,7 +206,7 @@ def compute_loss(py_init, target_height, t_span, params, restitution=0.0):
     ])
     ts, yt = adaptive_backward_euler_integrator(forward_euler, t_span, y0, params=params, restitution=restitution)
     final_height = yt[-1, 1]  # y-position only
-    loss = (final_height - target_height) ** 2
+    loss = final_height - target_height
     return loss, yt, ts
 
 def main():
@@ -213,8 +215,8 @@ def main():
     py_target = 2.1     # Initial y-position
     vx0 = 5.0           # Initial x-velocity
     vy0 = -5.0          # Target initial y-velocity
-    sim_time = 1.0     # Simulation time
-    restitution = 1.0  # Coefficient of restitution
+    sim_time = 1.0      # Simulation time
+    restitution = 1.0   # Coefficient of restitution
     tol = 1e-3          # Penetration tolerance
     dt_init = 0.01      # Initial time step
     num_substeps = 100  # Number of substeps for preview
@@ -227,9 +229,13 @@ def main():
 
     # Compute target height with y0 = 2.1
     y0_target = torch.tensor([px0, py_target, vx0, vy0], dtype=torch.float64, requires_grad=True)
+
+    integration_start_time = time.time()
     ts_target, yt_target = adaptive_backward_euler_integrator(
         forward_euler, t_span, y0_target, params=params, restitution=restitution, tol=tol, dt_init=dt_init, num_substeps=num_substeps
     )
+    integration_end_time = time.time()
+    print(f"Integration time: {integration_end_time - integration_start_time:.6f}")
     target_height = yt_target[-1, 1]  # Final y-position
     print(f"Target height with y0 = {py_target} m: {target_height.detach().numpy():.6f} m")
     print(f"Number of time steps: {len(ts_target)}")
@@ -269,8 +275,15 @@ def main():
     grad_values = []
     for py in py_range:
         py_tensor = torch.tensor(py, dtype=torch.float64, requires_grad=True)
+        loss_start_time = time.time()
         loss, _, _ = compute_loss(py_tensor, target_height, t_span, params, restitution=restitution)
+        loss_end_time = time.time()
+        print(f"Loss computation time: {loss_end_time - loss_start_time:.6f}")
+
+        grad_start_time = time.time()
         grad_py = torch.autograd.grad(loss, py_tensor)[0]
+        grad_end_time = time.time()
+        print(f"Grad computation time: {grad_end_time - grad_start_time:.6f}")
         print(f"y0: {py:.2f}, Loss: {loss.item():.6f}, Gradient: {grad_py.item():.6f}")
         loss_values.append(loss.item())
         grad_values.append(grad_py.item())
@@ -293,5 +306,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# 1993

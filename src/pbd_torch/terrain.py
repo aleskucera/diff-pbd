@@ -208,6 +208,7 @@ def create_terrain_from_exr_file(
     heightmap_path: str,
     size_x: float,
     size_y: float,
+    height_scale: float = 1.0,
     device: torch.device = torch.device("cpu"),
 ) -> Terrain:
     """
@@ -217,6 +218,7 @@ def create_terrain_from_exr_file(
         heightmap_path: Path to the .exr file
         size_x: Size of the ground in the x-direction (meters)
         size_y: Size of the ground in the y-direction (meters)
+        height_scale: Multiplier for the height values
 
     Returns:
         A Terrain object representing the heightmap
@@ -227,7 +229,7 @@ def create_terrain_from_exr_file(
     terrain = Terrain(
         size_x=float(size_x),
         size_y=float(size_y),
-        height_data=heightmap,
+        height_data=heightmap * height_scale,
         max_coord=max(size_x / 2, size_y / 2),  # Set max_coord explicitly
     )
 

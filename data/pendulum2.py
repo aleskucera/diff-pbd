@@ -5,7 +5,7 @@ from mujoco.glfw import glfw
 from mujoco_base import MuJoCoBase
 
 
-class ContolPendulum(MuJoCoBase):
+class ControlPendulum(MuJoCoBase):
     def __init__(self, xml_path):
         super().__init__(xml_path)
         self.actuator_type = "torque"
@@ -76,7 +76,7 @@ class ContolPendulum(MuJoCoBase):
 
 def main():
     xml_path = "./pendulum2.xml"
-    sim = ContolPendulum(xml_path)
+    sim = ControlPendulum(xml_path)
     sim.reset()
     sim.simulate()
 

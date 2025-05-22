@@ -149,17 +149,17 @@ def main():
     dt_max = 0.1        # Maximum time step
 
     # Parameters
-    params = [torch.tensor(0.0, dtype=torch.float64, requires_grad=True)]  # g
+    params = [torch.tensor(0.0, dtype=torch.float64)]  # g
 
     # Time span
     t_span = (0.0, sim_time)
 
-    # Compute target height with y0=2.1
-    y0_target = torch.tensor([px0, py_target, vx0, vy0], dtype=torch.float64, requires_grad=True)
+    # Initial state (which will be the target for the optimization)
+    y0_target = torch.tensor([px0, py_target, vx0, vy0], dtype=torch.float64)
     ts_target, yt_target, lambda_target = adaptive_backward_euler_integrator(
         f, t_span, y0_target, params=params, restitution=restitution, tol=tol, dt_init=dt_init, dt_min=dt_min, dt_max=dt_max
     )
-    target_height = yt_target[-1, 1]  # Final y-position
+    target_height = yt_target[-1, 1]
     print(f"Target height with y0 = {py_target} m: {target_height.detach().numpy():.6f} m")
 
     # Plot target trajectory

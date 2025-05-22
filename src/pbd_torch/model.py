@@ -163,6 +163,7 @@ class Model:
         terrain: Terrain = None,
         dynamic_friction_threshold: float = 0.0,
         max_contacts_per_body: int = 20,
+        gravity: bool = True,
     ):
         self.device = device
         self.requires_grad = requires_grad
@@ -247,9 +248,9 @@ class Model:
         )
 
         # System properties
-        self.g_accel = torch.tensor(
-            [0.0, 0.0, 0.0, 0.0, 0.0, -9.81], dtype=torch.float32, device=device
-        ).view(6, 1)
+        self.g_accel = torch.zeros((6, 1), dtype=torch.float32, device=device)
+        if gravity:
+            self.g_accel[5, 0] = -9.81
 
     @property
     def body_count(self):

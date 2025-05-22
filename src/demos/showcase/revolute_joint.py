@@ -1,3 +1,4 @@
+from typing import Union
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
@@ -15,7 +16,7 @@ from pbd_torch.transform import transform_points_batch, rotate_vector_inverse, r
 matplotlib.use("TkAgg")
 
 def plot_frame(
-    ax: Axes,
+    ax,
     frame: torch.Tensor,
     origin_color: Union[str, tuple],
     scale: float = 1.0,
@@ -40,28 +41,28 @@ def show_joint():
     model = Model()
     base = model.add_box(
         m=10.0,
-        hx=1.0,
-        hy=1.0,
-        hz=1.0,
+        hx=0.5,
+        hy=0.3,
+        hz=0.15,
         name="box",
         pos=Vector3(torch.tensor([0.0, 0.0, 2.1])),
         # pos=Vector3(torch.tensor([-8.0, 0.0, 3.0])),
         # rot=Quaternion(ROT_IDENTITY),
-        rot=Quaternion(ROT_45_X),
+        rot=Quaternion(ROT_IDENTITY),
         n_collision_points=200,
         restitution=0.1,
         dynamic_friction=1.0,
     )
     wheel = model.add_cylinder(
         m=1.0,
-        radius=2.0,
-        height=0.4,
+        radius=0.937/2.0,
+        height=0.142,
         name="left_wheel",
         # pos=Vector3(torch.tensor([-8.0, 3.0, 3.0])),
-        pos=Vector3(torch.tensor([0.0, 3.0, 2.1])),
+        pos=Vector3(torch.tensor([0.4, 0.52, 2.1])),
         rot=Quaternion(ROT_NEG_90_X),
-        n_collision_points_base=64,
-        n_collision_points_surface=64,
+        n_collision_points_base=128,
+        n_collision_points_surface=128,
         restitution=0.1,
         dynamic_friction=1.0,
     )
@@ -70,11 +71,11 @@ def show_joint():
     joint = model.add_hinge_joint(
         parent=base,
         child=wheel,
-        axis=Vector3(torch.tensor([0.0, 1.0, 0.0])),
+        axis=Vector3(torch.tensor([0.0, 0.1, 1.0])),
         name="left_wheel_joint",
-        parent_trans=torch.cat((torch.tensor([0.0, 2.5, 0.0]), ROT_NEG_90_X)),
+        parent_trans=torch.cat((torch.tensor([0.4, 0.4, 0.0]), ROT_NEG_90_X)),
         # child_trans=torch.cat((torch.tensor([0.0, 0.0, -1.0]), ROT_90_X)),
-        child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
+        child_trans=torch.tensor([0.0, 0.0, -0.12, 1.0, 0.0, 0.0, 0.0]),
     )
 
     base_q = model.body_q[base]
@@ -108,7 +109,7 @@ def show_joint():
     X_cj = model.joint_X_c[joint]
 
     # Get the world transforms of the parent and child bodies
-    X_wj_p = transform_multiply(X_pj.squeeze(-1), model.body_q[parent].squeeze(-1))
+    X_wj_p = transform_multiply(model.body_q[parent].squeeze(-1), X_pj.squeeze(-1))
     X_wj_c = transform_multiply(model.body_q[child].squeeze(-1), X_cj.squeeze(-1))
 
     # These transforms represent the same joint frame, so they should be equal
@@ -120,9 +121,9 @@ def show_joint():
     plot_frame(ax, X_wj_c, "green", scale=0.5, label="Joint Frame from Wheel")
 
     ax.set_box_aspect([1, 1, 1])
-    ax.set_xlim(-6, 6)
-    ax.set_ylim(-6, 6)
-    ax.set_zlim(-6, 6)
+    ax.set_xlim(-3, 3)
+    ax.set_ylim(-3, 3)
+    ax.set_zlim(-3, 3)
     ax.legend()
 
     plt.show()

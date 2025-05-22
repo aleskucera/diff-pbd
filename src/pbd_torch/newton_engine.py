@@ -17,6 +17,7 @@ from pbd_torch.model import Model
 from pbd_torch.model import State
 from xitorch.optimize import rootfinder
 from pbd_torch.utils import forces_from_joint_acts
+from pbd_torch.transform import quat_inv_batch, quat_mul_batch, rotate_vectors_batch
 
 
 
@@ -59,7 +60,7 @@ class NonSmoothNewtonEngine:
         self,
         model: Model,
         iterations: int = 10,
-        regularization: float = 1e-6,
+        regularization: float = 1e-4,
         convergence_tolerance: float = 1e-5,
         debug_jacobian: bool = False,
         debug_folder: str = "debug",
@@ -702,6 +703,24 @@ class NonSmoothNewtonEngine:
             state_in.body_q[:, 3:], body_vel[:, :3], dt
         )
 
+        # Compute joint_q
+        X_p, X_c, _, _ = self.revolute_constraint._get_joint_frames(state_out.body_q)
+        q_p = X_p[:, 3:]  # [D, 4, 1]
+        q_c = X_c[:, 3:]  # [D, 4, 1]
+        q_p_inv = quat_inv_batch(q_p)  # [D, 4, 1]
+        q_rel = quat_mul_batch(q_p_inv, q_c)  # [D, 4, 1]
+        q_rel = q_rel / torch.norm(q_rel, dim=1, keepdim=True)  # Normalize
+        theta = 2 * torch.atan2(q_rel[:, 3], q_rel[:, 0])  # [D]
+        state_out.joint_q = theta.view(D, 1)  # [D, 1]
+
+        # Compute joint_qd
+        omega_p = state_out.body_qd[self.model.joint_parent, :3]  # [D, 3]
+        omega_c = state_out.body_qd[self.model.joint_child, :3]  # [D, 3]
+        axis_local = torch.tensor([0.0, 0.0, 1.0], device=self.device).view(1, 3, 1).expand(D, 3, 1)
+        axis_world = rotate_vectors_batch(axis_local, q_p)  # [D, 3, 1]
+        rel_omega = omega_c - omega_p  # [D, 3, 1]
+        state_out.joint_qd = torch.sum(rel_omega * axis_world, dim=1)
+
     def simulate_xitorch(
             self,
             state_in: State,
@@ -785,4 +804,20 @@ class NonSmoothNewtonEngine:
             state_in.body_q[:, 3:], body_vel[:, :3], dt
         )
 
+        # Compute joint_q
+        X_p, X_c, _, _ = self.revolute_constraint._get_joint_frames(state_out.body_q)
+        q_p = X_p[:, 3:]  # [D, 4, 1]
+        q_c = X_c[:, 3:]  # [D, 4, 1]
+        q_p_inv = quat_inv_batch(q_p)  # [D, 4, 1]
+        q_rel = quat_mul_batch(q_p_inv, q_c)  # [D, 4, 1]
+        q_rel = q_rel / torch.norm(q_rel, dim=1, keepdim=True)  # Normalize
+        theta = 2 * torch.atan2(q_rel[:, 3], q_rel[:, 0])  # [D]
+        state_out.joint_q = theta.view(D, 1)  # [D, 1]
 
+        # Compute joint_qd
+        omega_p = state_out.body_qd[self.model.joint_parent, :3]  # [D, 3]
+        omega_c = state_out.body_qd[self.model.joint_child, :3]  # [D, 3]
+        axis_local = torch.tensor([0.0, 0.0, 1.0], device=self.device).view(1, 3, 1).expand(D, 3, 1)
+        axis_world = rotate_vectors_batch(axis_local, q_p)  # [D, 3, 1]
+        rel_omega = omega_c - omega_p  # [D, 3, 1]
+        state_out.joint_qd = torch.sum(rel_omega * axis_world, dim=1)

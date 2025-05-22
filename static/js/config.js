@@ -64,7 +64,7 @@ export const LIGHTING_CONFIG = {
 export const GROUND_CONFIG = {
   size: 1000, // Size of the ground plane
   divisions: 100, // Number of grid divisions
-  mainColor: 0x444444, // Main ground color
+  mainColor: 0xFFFFFF, // Main ground color
   gridColor: 0x888888, // Grid line color
   position: [0, 0, 0], // Position of the ground plane
   rotation: [0, 0, 0], // Rotation of the ground plane
@@ -95,6 +95,7 @@ export const BODY_CONFIG = {
     color: 0x4080ff,
   },
   mesh: {
+    // color: 0xD3D3D3,
     color: 0xc1c1c1,
     roughness: 0.8,
     metalness: 0.9,

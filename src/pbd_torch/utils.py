@@ -1,6 +1,12 @@
+from typing import Tuple
+
 import torch
-from pbd_torch.transform import transform_multiply_batch
-from pbd_torch.transform import rotate_vectors_batch
+from simview import BodyShapeType
+from simview import SimulationScene
+from simview import SimViewLauncher
+from simview import SimViewBodyState
+from pbd_torch.transform import transform_multiply_batch, normalize_quat_batch
+from pbd_torch.transform import rotate_vectors_batch, quat_inv_batch, quat_mul_batch
 
 
 def _create_orthogonal_basis(first_axis: torch.Tensor):
@@ -242,7 +248,7 @@ def forces_from_joint_acts(
         joint_qd,
         joint_ke,
         joint_kd,
-        mode=0) # [D, 1]
+        mode=2) # [D, 1]
 
     torque_p = z_p * joint_force.unsqueeze(1) # [D, 3, 1]
     torque_c = z_c * joint_force.unsqueeze(1) # [D, 3, 1]
@@ -322,3 +328,77 @@ def swap_quaternion_real_part(
     transformed_tensor = torch.cat([positions, quaternions_xyzw], dim=1) # Shape [N, 7, 1]
 
     return transformed_tensor
+
+def compute_joint_coordinates(
+    body_q: torch.Tensor,
+    body_qd: torch.Tensor,
+    joint_parent: torch.Tensor,
+    joint_child: torch.Tensor,
+    joint_X_p: torch.Tensor,
+    joint_X_c: torch.Tensor,
+    joint_axis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    q_parent = body_q[joint_parent]  # [D, 7, 1]
+    q_child = body_q[joint_child]  # [D, 7, 1]
+
+    # Joint frames computed from the parent and child bodies
+    X_p_w = transform_multiply_batch(q_parent, joint_X_p)  # [D, 7, 1]
+    X_c_w = transform_multiply_batch(q_child, joint_X_c)  # [D, 7, 1]
+
+    rot_p = X_p_w[:, 3:] # [D, 4, 1]
+    rot_c = X_c_w[:, 3:] # [D, 4, 1]
+
+    rot_p_inv = quat_inv_batch(rot_p) # [D, 4, 1]
+    rot_rel = quat_mul_batch(rot_p_inv, rot_c) # [D, 4, 1]
+    rot_rel = normalize_quat_batch(rot_rel) # [D, 4, 1]
+    joint_angle = 2 * torch.atan2(rot_rel[:, 3], rot_rel[:, 0]) # [D]
+    joint_q = joint_angle.view(-1, 1) # [D, 1]
+
+    # Compute joint velocities
+    omega_p = body_qd[joint_parent, :3] # [D, 3, 1]
+    omega_c = body_qd[joint_child, :3] # [D, 3, 1]
+
+    joint_axis_w = rotate_vectors_batch(joint_axis, rot_p) # [D, 3, 1]
+    rel_omega = omega_c - omega_p # [D, 3, 1]
+    joint_omega = torch.matmul(joint_axis_w.transpose(2, 1), rel_omega) # [D, 1, 1]
+    joint_qd = joint_omega.view(-1, 1) # [D, 1]
+
+    return joint_q, joint_qd
+
+def add_state_to_scene(
+    sim_scene: SimulationScene,
+    model,
+    state,
+    time: float,
+    scalar_values: dict[str, torch.Tensor],
+) -> None:
+    """
+    Adds a state to the simulation scene.
+
+    Args:
+        sim_scene (SimulationScene): The simulation scene to which the state will be added.
+        body_states (list[SimViewBodyState]): List of body states to add.
+        scalar_values (dict[str, torch.Tensor]): Dictionary of scalar values to add.
+        time (float): The time at which the state is recorded.
+    """
+    body_states = []
+    for body in range(model.num_bodies):
+        body_states.appen(SimViewBodyState(
+            body_name=model.body_name[body],
+            position=state.body_q[body, :3].flatten(),
+            orientation=state.body_q[body, 3:].flatten(),
+        ))
+
+    sim_scene.add_state(
+        time=time,
+        body_states=body_states,
+        scalar_values=scalar_values,
+    )
+
+def create_scene_from_model(
+        model,
+        batch_size: int,
+        scalar_names: list[str] = None,
+):
+ pass

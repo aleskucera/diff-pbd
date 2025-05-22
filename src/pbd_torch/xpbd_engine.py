@@ -13,7 +13,7 @@ from pbd_torch.transform import normalize_quat_batch
 from pbd_torch.transform import quat_inv_batch
 from pbd_torch.transform import quat_mul_batch
 from pbd_torch.transform import transform_points_batch
-from pbd_torch.utils import forces_from_joint_acts
+from pbd_torch.utils import forces_from_joint_acts, compute_joint_coordinates
 
 
 def numerical_qd(
@@ -325,10 +325,15 @@ class XPBDEngine:
 
     def __init__(self, model: Model,
                  pos_iters: int = 5,
-                 device: torch.device = torch.device("cpu")):
+                 device: torch.device = torch.device("cpu"),
+                 contact_compliance: float = 1e-6,
+                 joint_compliance: float = 1e-4):
         self.pos_iters = pos_iters
         self.integrator = SemiImplicitEulerIntegrator(use_local_omega=False, device=device)
         self.model = model
+
+        self.contact_compliance = contact_compliance
+        self.joint_compliance = joint_compliance
 
     def simulate(
         self,
@@ -395,9 +400,18 @@ class XPBDEngine:
         )
         body_qd = body_qd + velocity_deltas
 
+        joint_q, joint_qd = compute_joint_coordinates(body_q,
+                                                      body_qd,
+                                                      self.model.joint_parent,
+                                                      self.model.joint_child,
+                                                      self.model.joint_X_p,
+                                                      self.model.joint_X_c,
+                                                      self.model.joint_axis)
         # Save the final state
         state_out.body_q = body_q
         state_out.body_qd = body_qd
+        state_out.joint_q = joint_q
+        state_out.joint_qd = joint_qd
         state_out.time = state_in.time + dt
 
     def position_solve_jacobi(self,
@@ -412,8 +426,8 @@ class XPBDEngine:
         lambda_n = torch.zeros((self.model.body_count, 1, 1), device=body_q.device)
         lambda_j_pos = torch.zeros((self.model.joint_count, 1, 1), device=body_q.device)
         lambda_j_rot = torch.zeros((self.model.joint_count, 1, 1), device=body_q.device)
-        contact_compliance = torch.full((self.model.body_count, 1, 1), 1e-4, device=body_q.device)
-        joint_compliance = torch.full((self.model.joint_count, 1, 1), 1e-4, device=body_q.device)
+        contact_compliance = torch.full((self.model.body_count, 1, 1), self.contact_compliance, device=body_q.device)
+        joint_compliance = torch.full((self.model.joint_count, 1, 1), self.joint_compliance, device=body_q.device)
 
         for _ in range(self.pos_iters):
            # ----------------------------------- START: CONTACT CORRECTION -----------------------------------
@@ -458,6 +472,6 @@ class XPBDEngine:
             )
 
             body_q = body_q + dbody_q_n + dbody_q_j_pos + dbody_q_j_rot
-            body_q[:, 3:] = normalize_quat_batch(body_q[:, 3:])
+            body_q[:, 3:] = normalize_quat_batch(body_q[:, 3:].clone())
 
         return body_q, lambda_n

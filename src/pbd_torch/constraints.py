@@ -163,7 +163,7 @@ class ContactConstraint:
         fb_alpha: float = 0.3,
         fb_beta: float = 0.3,
         fb_epsilon: float = 1e-12,
-        stabilization_factor: float = 0.2):
+        stabilization_factor: float = 0.01):
         self.device = device
 
         self.stabilization_factor = stabilization_factor
@@ -346,7 +346,7 @@ class ContactConstraint:
 class FrictionConstraint:
     def __init__(self, device: torch.device):
         self.device = device
-        self.eps = 1e-12
+        self.eps = 1e-6
 
         self.fb = ScaledFisherBurmeister(alpha=0.3, beta=0.3, epsilon=self.eps)
 
@@ -641,9 +641,9 @@ class RevoluteConstraint:
         
         self.device = model.device
         
-        self.stabilization_factor = 0.2
-        self.eps = 1e-10
-        self.weight = 1
+        self.stabilization_factor = 0.01
+        self.eps = 1e-6
+        self.weight = 10
         
     
     def _get_joint_frames(self,
@@ -902,7 +902,7 @@ class RevoluteConstraint:
         Compute derivatives of joint residuals w.r.t. body velocities.
 
         Args:
-            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies.
+            body_vel: Body velocities, shape [B, 6, 1], where B is the number of bodies
             J_j_p: Joint Jacobians for parent bodies, shape [5D, 6], where D is the number of joints.
             J_j_c: Joint Jacobians for child bodies, shape [5D, 6].
 

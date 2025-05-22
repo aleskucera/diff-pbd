@@ -41,13 +41,13 @@ def backward_euler_integrator(fcn, ts, y0, params, restitution=0.0):
         t_next = ts[i + 1]
         dt = t_next - t_curr
 
-        # Residual function with contact
+        # residual function with contact
         def residual(z_next, y_curr, dt, g, collision: bool):
             vx_next, vy_next, lambda_next = z_next
-            # Velocity updates
-            res1 = vx_next - y_curr[2]  # No force in x-direction
+            # velocity updates
+            res1 = vx_next - y_curr[2]  # no force in x-direction
             res2 = vy_next - y_curr[3] + dt * g - lambda_next
-            # Complementarity with restitution: λ ≥ 0, y ≥ 0, λ * (y - e * v_{y,prev} * dt) = 0
+            # complementarity with restitution: λ ≥ 0, y ≥ 0, λ * (y - e * v_{y,prev} * dt) = 0
             if collision:
                 with torch.no_grad():
                     b_err = (0.01 / dt) * y_curr[1]
@@ -57,19 +57,19 @@ def backward_euler_integrator(fcn, ts, y0, params, restitution=0.0):
                 res3 = -lambda_next
             return torch.stack([res1, res2, res3])
 
-        # Initial guess: forward Euler without contact
+        # initial guess: forward euler without contact
         x_guess = y_curr[0] + dt * y_curr[2]
         y_guess = y_curr[1] + dt * y_curr[3]
         vx_guess = y_curr[2]
         vy_guess = y_curr[3] - dt * g
         z_guess = torch.tensor([vx_guess, vy_guess, 0.0], dtype=torch.float64)
 
-        # Check for collision
+        # check for collision
         collision = False
         if y_curr[1] < 0.0:
             collision = True
 
-        # Solve for next state
+        # solve for next state
         z_next = rootfinder(
             residual,
             z_guess,
@@ -79,13 +79,72 @@ def backward_euler_integrator(fcn, ts, y0, params, restitution=0.0):
             maxiter=10
         )
 
-        # Extract state
+        # extract state
         vx_next, vy_next = z_next[:2]
         x_next = y_curr[0] + dt * vx_next
         y_next = y_curr[1] + dt * vy_next
         yt_list.append(torch.stack([x_next, y_next, vx_next, vy_next]))
 
     return torch.stack(yt_list, dim=0)
+
+
+def backward_euler_integrator_position(fcn, ts, y0, params, restitution=0.0):
+    g = params[0]
+    e = restitution
+    n_steps = len(ts) - 1
+    yt_list = [y0]  # y0 is [x, y, vx, vy]
+
+    for i in range(n_steps):
+        t_curr, y_curr = ts[i], yt_list[i]
+        t_next = ts[i + 1]
+        dt = t_next - t_curr
+
+        # residual function with contact
+        def residual(z_next, y_curr, dt, g, collision: bool):
+            x_next, y_next, lambda_next = z_next
+            x_curr, y_curr, vx_curr, vy_curr = y_curr
+
+            # position updates
+            res1 = x_next - x_curr - dt * vx_curr
+            res2 = y_next - y_curr - dt * vy_curr - (dt ** 2) * g - dt * lambda_next
+
+            if collision:
+                b_rest = e * (y_next - y_curr) / dt
+                res3 = fb(lambda_next, y_next)
+            else:
+                res3 = -lambda_next
+            return torch.stack([res1, res2, res3])
+
+        # initial guess: forward euler without contact
+        vx_guess = y_curr[2]
+        vy_guess = y_curr[3] - dt * g
+        x_guess = y_curr[0] + dt * vx_guess
+        y_guess = y_curr[1] + dt * vy_guess
+        z_guess = torch.tensor([x_guess, y_guess, 0.0], dtype=torch.float64)
+
+        # check for collision
+        collision = False
+        if y_curr[1] < 0.0:
+            collision = True
+
+        # solve for next state
+        z_next = rootfinder(
+            residual,
+            z_guess,
+            method=newton,
+            params=(y_curr, dt, g, collision),
+            tol=1e-9,
+            maxiter=10
+        )
+
+        # extract state
+        x_next, y_next = z_next[:2]
+        vx_next = (x_next - y_curr[0]) / dt
+        vy_next = (y_next - y_curr[1]) / dt
+        yt_list.append(torch.stack([x_next, y_next, vx_next, vy_next]))
+
+    return torch.stack(yt_list, dim=0)
+
 
 def compute_loss(py_init, target_height, ts, params, restitution=0.0):
     """Compute loss based on final y-position (height) only."""
@@ -98,7 +157,7 @@ def compute_loss(py_init, target_height, ts, params, restitution=0.0):
     ])
     yt = backward_euler_integrator(f, ts, y0, params=params, restitution=restitution)
     final_height = yt[-1, 1]  # y-position only
-    loss = (final_height - target_height) ** 2
+    loss = final_height
     return loss, yt
 
 
@@ -108,20 +167,24 @@ def main():
     py_target = 2.1     # Initial y-position
     vx0 = 5.0           # Initial x-velocity
     vy0 = -5.0          # Target initial y-velocity
-    dt = 0.05           # Time step
-    sim_time = 0.8      # Simulation time
+    dt = 0.1           # Time step
+    sim_time = 1.0      # Simulation time
     steps = int(sim_time / dt)
     restitution = 1.0  # Coefficient of restitution
 
     # Parameters
-    params = [torch.tensor(0.0, dtype=torch.float64, requires_grad=True)]  # g
+    params = [torch.tensor(0.0, dtype=torch.float64)]  # g
 
     # Time steps
     ts = torch.linspace(0, sim_time, steps + 1)
 
     # Compute target height with vx=5.0
-    y0_target = torch.tensor([px0, py_target, vx0, vy0], dtype=torch.float64, requires_grad=True)
+    y0_target = torch.tensor([px0, py_target, vx0, vy0], dtype=torch.float64)
+    backward_euler_time = time.time()
     yt_target = backward_euler_integrator(f, ts, y0_target, params=params, restitution=restitution)
+    backward_euler_time = time.time() - backward_euler_time
+    print(f"Backward Euler time: {backward_euler_time:.6f} seconds")
+
     target_height = yt_target[-1, 1]  # Only the final y-position
     print(f"Target height with y0 = {py_target} m: {target_height.detach().numpy():.6f} m")
 
@@ -147,8 +210,17 @@ def main():
     grad_values = []
     for py in py_range:
         py_tensor = torch.tensor(py, dtype=torch.float64, requires_grad=True)
+
+        loss_start = time.time()
         loss, _ = compute_loss(py_tensor, target_height, ts, params=params, restitution=restitution)
+        loss_end = time.time() - loss_start
+        print(f"Loss computation time: {loss_end:.6f} seconds")
+
+        grad_start = time.time()
         grad_py = torch.autograd.grad(loss, py_tensor)[0]
+        grad_end = time.time() - grad_start
+        print(f"Gradient computation time: {grad_end:.6f} seconds")
+
         print(f"y: {py:.2f}, Loss: {loss.item():.6f}, Gradient: {grad_py.item():.6f}")
         loss_values.append(loss.item())
         grad_values.append(grad_py.item())

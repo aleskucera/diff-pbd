@@ -100,8 +100,8 @@ def positional_deltas(
 
     # Compute the impulse magnitude
     alpha = compliance / (h ** 2)  # [batch_size, 1, 1]
-    # dlambda = -c / (weight_a + weight_b) # [batch_size, 1, 1]
-    dlambda = -(c + alpha * lambda_) / (weight_a + weight_b + alpha) # [batch_size, 1, 1]
+    dlambda = -c / (weight_a + weight_b) # [batch_size, 1, 1]
+    # dlambda = -(c + alpha * lambda_) / (weight_a + weight_b + alpha) # [batch_size, 1, 1]
 
     # Compute impulse vectors
     p = dlambda * J  # [batch_size, 3, 1]
@@ -304,7 +304,7 @@ def velocity_deltas(
     v_n_prev, _, _ = body_point_velocity(body_q, body_qd_prev, r, n)
 
     # ------------------------------ START: RESTITUTION ------------------------------
-    c_restitution = v_n + torch.max(restitution * v_n_prev, torch.zeros_like(v_n))  # [batch_size, 1, 1]
+    c_restitution = torch.min(v_n + restitution * v_n_prev, torch.zeros_like(v_n))  # [batch_size, 1, 1]
 
     # Apply a threshold to avoid jittering (2 * gravity * h)
     jitter_threshold = torch.tensor(2 * 9.81 * h, device=device)
@@ -315,7 +315,7 @@ def velocity_deltas(
     # ------------------------------- END: RESTITUTION ------------------------------
 
     # ------------------------------ START: DYNAMIC FRICTION ------------------------------
-    c_friction = torch.min(dynamic_friction * torch.abs(lambda_n) / h, v_t_magnitude)  # [batch_size, 1, 1]
+    c_friction = torch.min(dynamic_friction * torch.abs(lambda_n) / h**2, v_t_magnitude)  # [batch_size, 1, 1]
 
     dbody_qd_friction = velocity_deltas_from_constraint(c_friction, v_t_direction, body_q, m_inv, I_inv, r) # [batch_size, 6, 1]
     # ------------------------------------ END: DYNAMIC FRICTION ------------------------------

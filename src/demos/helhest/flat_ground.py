@@ -1,134 +1,48 @@
 import os
 
 import torch
+from tqdm import tqdm
 from demos.utils import save_simulation
 from pbd_torch.collision import collide
-from pbd_torch.newton_engine import NonSmoothNewtonEngine
-from pbd_torch.constants import ROT_90_X
-from pbd_torch.constants import ROT_IDENTITY
-from pbd_torch.constants import ROT_NEG_90_X
-from pbd_torch.model import Model
-from pbd_torch.model import Quaternion
-from pbd_torch.model import Vector3
 from pbd_torch.xpbd_engine import XPBDEngine
-from tqdm import tqdm
+from pbd_torch.newton_engine import NonSmoothNewtonEngine
+from demos.helhest.utils import create_helhest_model
 
+ENGINE = "NonSmoothNewton"  # Choose between "XPBD" and "NonSmoothNewton"
 
 def main():
-    dt = 0.01
-    n_steps = 300
+    dt = 0.001
+    n_steps = 500
     device = torch.device("cuda")
     collision_margin = 0.0
-    dynamic_friction_threshold = 0.2
     output_file = os.path.join("simulation", "helhest_flat_ground.json")
 
-    model = Model(
+    model, idxs = create_helhest_model(
+        base_pos=(-8.0, 0.0, 3.0),
         device=device,
-        dynamic_friction_threshold=dynamic_friction_threshold,
+        terrain=None,
         max_contacts_per_body=16,
     )
 
-    # Add robot base
-    base = model.add_box(
-        m=3.0,
-        hx=1.0,
-        hy=2.0,
-        hz=1.0,
-        name="box",
-        pos=Vector3(torch.tensor([-8.0, 0.0, 3.0])),
-        rot=Quaternion(ROT_IDENTITY),
-        n_collision_points=500,
-        restitution=0.0,
-        dynamic_friction=1.0,
-    )
+    if ENGINE == "XPBD":
+        engine = XPBDEngine(model, pos_iters=50, device=device)
+    elif ENGINE == "NonSmoothNewton":
+        engine = NonSmoothNewtonEngine(model, iterations=50, device=device)
+    else:
+        raise ValueError(f"Unknown engine: {ENGINE}")
 
-    # Add left wheel
-    left_wheel = model.add_cylinder(
-        m=1.0,
-        radius=2.0,
-        height=0.4,
-        name="left_wheel",
-        pos=Vector3(torch.tensor([-8.0, 3.0, 3.0])),
-        rot=Quaternion(ROT_NEG_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
-        restitution=0.0,
-        dynamic_friction=1.0,
-    )
-
-    # Add right wheel
-    right_wheel = model.add_cylinder(
-        m=1.0,
-        radius=2.0,
-        height=0.4,
-        name="right_wheel",
-        pos=Vector3(torch.tensor([-8.0, -3.0, 3.0])),
-        rot=Quaternion(ROT_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
-        restitution=0.0,
-        dynamic_friction=1.0,
-    )
-
-    # Back wheel
-    back_wheel = model.add_cylinder(
-        m=1.0,
-        radius=2.0,
-        height=0.4,
-        name="back_wheel",
-        pos=Vector3(torch.tensor([-12.0, 0.0, 3.0])),
-        rot=Quaternion(ROT_NEG_90_X),
-        n_collision_points_base=128,
-        n_collision_points_surface=128,
-        restitution=0.0,
-        dynamic_friction=1.0,
-    )
-
-    # Add left hinge joint
-    left_wheel_joint = model.add_hinge_joint(
-        parent=base,
-        child=left_wheel,
-        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
-        name="left_wheel_joint",
-        parent_trans=torch.cat((torch.tensor([0.0, 2.5, 0.0]), ROT_NEG_90_X)),
-        child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
-    )
-
-    # Add right hinge joint
-    right_wheel_joint = model.add_hinge_joint(
-        parent=base,
-        child=right_wheel,
-        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
-        name="right_wheel_joint",
-        parent_trans=torch.cat((torch.tensor([0.0, -2.5, 0.0]), ROT_90_X)),
-        child_trans=torch.tensor([0.0, 0.0, -0.5, 1.0, 0.0, 0.0, 0.0]),
-    )
-
-    # Add back hinge joint
-    back_wheel_joint = model.add_hinge_joint(
-        parent=base,
-        child=back_wheel,
-        axis=Vector3(torch.tensor([0.0, 0.0, 1.0])),
-        name="back_wheel_joint",
-        parent_trans=torch.cat((torch.tensor([-4.0, 0.0, 0.0]), ROT_NEG_90_X)),
-        child_trans=torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
-    )
-
-    engine = NonSmoothNewtonEngine(model, iterations=50, device=device)
-    # engine = XPBDEngine(model, pos_iters=5, device=device)
-
-    # Set up the initial state
     states = [model.state() for _ in range(n_steps)]
-
     control = model.control()
 
     for i in tqdm(range(n_steps - 1), desc="Simulating"):
         collide(model, states[i], collision_margin=collision_margin)
 
-        control.add_actuation(left_wheel_joint, 15)
-        control.add_actuation(right_wheel_joint, -15)
+        control.add_actuation(idxs['left_wheel_joint'], 3.0)
+        control.add_actuation(idxs['right_wheel_joint'], -3.0)
 
         engine.simulate(states[i], states[i + 1], control, dt)
+
+        # print(f"{states[i].joint_qd}")
 
     print(f"Saving simulation to {output_file}")
     save_simulation(model, states, output_file)

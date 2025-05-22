@@ -686,7 +686,7 @@ class NonSmoothNewtonEngine:
             body_f=self._body_force,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
-            gravity=self.model.g_accel,
+            g_accel=self.model.g_accel,
             dt=self._dt,
         )
 
@@ -730,7 +730,7 @@ class NonSmoothNewtonEngine:
             body_f=self._body_force,
             body_inv_mass=self.model.body_inv_mass,
             body_inv_inertia=self.model.body_inv_inertia,
-            gravity=self.model.g_accel,
+            g_accel=self.model.g_accel,
             dt=self._dt,
         )
 

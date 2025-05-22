@@ -28,7 +28,7 @@ export class FlatGround {
       color: GROUND_CONFIG.mainColor,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.5,
+      opacity: 1.0,
     });
 
     this.ground = new THREE.Mesh(groundGeometry, groundMaterial);
